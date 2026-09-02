@@ -1,0 +1,6 @@
+{
+  "name": "Remindly AI Backend Proxy",
+  "description": "Full-stack AI extraction proxy and developer console with tiered local rule-based AI & Gemini intelligence, rate limiting, and telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
