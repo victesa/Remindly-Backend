@@ -21,8 +21,6 @@ View your app in AI Studio: https://ai.studio/apps/e395d4bd-79d3-4835-8c40-eb034
    `FIREBASE_PROJECT_ID=...`
 3. Run the Worker locally:
    `npm run dev`
-4. If you need the legacy Node server instead, keep secrets in `.env.local` or `.env` and run:
-   `npm run dev:node`
 
 ## Cloudflare Workers Deployment
 
@@ -46,4 +44,3 @@ This project is configured to deploy as a Cloudflare Worker with static SPA asse
 Notes:
 - Use `.dev.vars` for local Worker-only secrets. It is gitignored.
 - `.env` files remain local-only and are gitignored.
-- The legacy Node server is still available via `npm run dev:node`.

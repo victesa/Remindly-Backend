@@ -22,5 +22,14 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "server.ts",
+    "src/server/auth.ts",
+    "src/server/extractor.ts",
+    "src/server/firebaseStore.ts",
+    "src/server/firestoreClient.ts",
+    "src/server/logger.ts",
+    "src/server/rateLimiter.ts"
+  ]
 }
