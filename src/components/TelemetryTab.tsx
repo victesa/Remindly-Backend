@@ -29,7 +29,7 @@ export const TelemetryTab: React.FC<TelemetryTabProps> = ({ aiStatus, onRefresh 
     try {
       const url = tierFilter === 'all' ? '/v1/logs?limit=100' : `/v1/logs?limit=100&tier=${tierFilter}`;
       const res = await fetch(url);
-      const data = await res.json();
+      const data = await res.json() as { success?: boolean; logs?: LogEntry[] };
       if (data.success) {
         setLogs(data.logs || []);
       }

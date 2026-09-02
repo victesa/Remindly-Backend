@@ -32,7 +32,7 @@ export const CapturesTab: React.FC<CapturesTabProps> = ({ currentTier }) => {
           'Authorization': `Bearer remindly_test_${currentTier}_playground_user`,
         },
       });
-      const data = await res.json();
+      const data = await res.json() as { error?: string; items?: StoredReminderItem[] };
       if (!res.ok) throw new Error(data.error || 'Failed to load items');
       setItems(data.items || []);
     } catch (err: any) {

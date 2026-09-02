@@ -1,11 +1,12 @@
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { ExtractedReminderData, ReminderCategory, UserTier } from '../types.js';
+import { getRuntimeConfig } from '../runtimeConfig.js';
 
 let geminiClient: GoogleGenAI | null = null;
 
 function getGeminiClient(): GoogleGenAI {
   if (!geminiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = getRuntimeConfig().GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY is not configured in the environment.');
     }

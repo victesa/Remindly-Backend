@@ -154,7 +154,7 @@ export const ApiPlayground: React.FC<ApiPlaygroundProps> = ({ currentTier, onRef
         body: formData,
       });
 
-      const data = await res.json();
+      const data = await res.json() as { error?: string } & Record<string, unknown>;
       if (!res.ok) {
         throw new Error(data.error || `HTTP error ${res.status}`);
       }

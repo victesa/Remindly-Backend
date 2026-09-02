@@ -19,7 +19,7 @@ export default function App() {
       // 1. Fetch AI Service Status
       const statusRes = await fetch('/v1/ai-status');
       if (statusRes.ok) {
-        const data = await statusRes.json();
+        const data = await statusRes.json() as { success?: boolean; data?: AiServiceStatus };
         if (data.success) {
           setAiStatus(data.data);
         }
@@ -33,7 +33,7 @@ export default function App() {
         },
       });
       if (quotaRes.ok) {
-        const data = await quotaRes.json();
+        const data = await quotaRes.json() as { success?: boolean; quota?: QuotaInfo };
         if (data.success) {
           setQuota(data.quota);
         }

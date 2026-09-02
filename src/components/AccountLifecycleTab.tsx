@@ -38,7 +38,7 @@ export const AccountLifecycleTab: React.FC<AccountLifecycleTabProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tier: mintTier, userId: mintUserId }),
       });
-      const data = await res.json();
+      const data = await res.json() as { success?: boolean; token?: string };
       if (data.success) {
         setMintedToken(data.token);
       }
@@ -70,7 +70,7 @@ export const AccountLifecycleTab: React.FC<AccountLifecycleTabProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: resetEmail }),
       });
-      const data = await res.json();
+      const data = await res.json() as { message?: string };
       setResetStatus(data.message || 'Password reset email triggered.');
     } catch (err) {
       setResetStatus('Error triggering password reset.');
@@ -90,7 +90,7 @@ export const AccountLifecycleTab: React.FC<AccountLifecycleTabProps> = ({
           'Authorization': `Bearer remindly_test_${currentTier}_playground_user`,
         },
       });
-      const data = await res.json();
+      const data = await res.json() as { message?: string };
       setDeleteStatus(data.message || 'Account purged successfully');
       setDeleteConfirm(false);
     } catch (err) {

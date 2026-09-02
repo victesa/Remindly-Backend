@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
+import { setRuntimeConfig } from './src/runtimeConfig.js';
 
 import { authenticateToken, mintDevToken } from './src/server/auth.js';
 import { rateLimiterMiddleware, getQuotaInfo, resetUserQuota, resetAllQuotas } from './src/server/rateLimiter.js';
@@ -11,6 +12,8 @@ import { logOperation, getRecentLogs, clearLogs, getAiServiceStatus } from './sr
 import { getUserItems, updateUserItem, deleteUserItem, deleteUserData, requestPasswordReset } from './src/server/firebaseStore.js';
 import { processExtraction } from './src/server/extractor.js';
 import { UserTier } from './src/types.js';
+
+setRuntimeConfig(process.env);
 
 const upload = multer({
   storage: multer.memoryStorage(),
