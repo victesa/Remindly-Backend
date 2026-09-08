@@ -48,6 +48,7 @@ export interface ExtractionMetadata {
   hasImage: boolean;
   hasText: boolean;
   hasUrl: boolean;
+  clientSource?: string | null;
   userId: string;
   userTier: UserTier;
   cached: boolean;
@@ -94,6 +95,7 @@ export interface StoredReminderItem {
   persistedSource: 'firestore' | 'memory';
   source?: {
     contentType: 'TEXT' | 'URL' | 'IMAGE' | 'MULTIMODAL';
+    clientSource?: string | null;
     sourceUrl?: string | null;
     mimeType?: string | null;
     fileName?: string | null;

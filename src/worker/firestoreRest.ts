@@ -34,6 +34,7 @@ interface CachedEntry {
   hasImage: boolean;
   hasText: boolean;
   hasUrl: boolean;
+  clientSource?: string | null;
 }
 
 interface RateLimitRecord {
@@ -46,6 +47,7 @@ type EditableItemState = 'OPEN' | 'DONE';
 type SourceType = 'text' | 'image' | 'url' | 'multimodal';
 
 export interface SaveItemContext {
+  clientSource?: string | null;
   text?: string;
   url?: string;
   userTimezone?: string;
@@ -507,6 +509,7 @@ export async function saveExtractedItem(
     sourceType === 'multimodal' ? 'MULTIMODAL' : sourceType === 'text' ? 'TEXT' : sourceType === 'url' ? 'URL' : 'IMAGE';
   const source = {
     contentType: sourceContentType,
+    clientSource: context?.clientSource || null,
     sourceUrl: context?.url || data.url || null,
     mimeType: context?.imageMimeType || null,
     fileName: context?.imageOriginalName || null,

@@ -19,8 +19,15 @@ View your app in AI Studio: https://ai.studio/apps/e395d4bd-79d3-4835-8c40-eb034
    `GEMINI_API_KEY=...`
    `FIREBASE_SERVICE_ACCOUNT_JSON=...`
    `FIREBASE_PROJECT_ID=...`
+   (You can start from `.dev.vars.example`.)
+   Note: `.env` is not used by `wrangler dev` for Worker bindings.
 3. Run the Worker locally:
    `npm run dev`
+
+Optional UI-only mode:
+- Run Worker API in one terminal: `npm run dev`
+- Run Vite UI in another terminal: `npx vite`
+- The Vite dev server proxies `/v1/*` and `/api/*` to `http://127.0.0.1:8787` by default.
 
 ## Cloudflare Workers Deployment
 

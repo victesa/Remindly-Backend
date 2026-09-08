@@ -49,6 +49,7 @@ interface CachedEntry {
   hasImage: boolean;
   hasText: boolean;
   hasUrl: boolean;
+  clientSource: string | null;
 }
 
 const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
@@ -101,6 +102,7 @@ function computePayloadHash(
   userTier: UserTier,
   text?: string,
   url?: string,
+  clientSource?: string,
   imageBuffer?: Buffer,
 ): string {
   const hash = createHash('sha256');
@@ -108,6 +110,7 @@ function computePayloadHash(
   hash.update(`${userTier}:`);
   hash.update(text ? text.trim().toLowerCase() : '');
   hash.update(url ? url.trim().toLowerCase() : '');
+  hash.update(clientSource ? clientSource.trim().toLowerCase() : '');
   if (imageBuffer && imageBuffer.length > 0) {
     hash.update(imageBuffer.slice(0, 2048));
   }
@@ -117,6 +120,7 @@ function computePayloadHash(
 async function parseExtractionRequest(request: Request): Promise<{
   text?: string;
   url?: string;
+  clientSource?: string;
   idempotencyKey?: string | null;
   currentDate?: string;
   userTimezone?: string;
@@ -145,6 +149,7 @@ async function parseExtractionRequest(request: Request): Promise<{
     return {
       text: (formData.get('text') as string | null) || undefined,
       url: (formData.get('url') as string | null) || undefined,
+      clientSource: (formData.get('source') as string | null)?.trim() || undefined,
       idempotencyKey: ((request.headers.get('idempotency-key')) || (formData.get('idempotencyKey') as string | null)) || null,
       currentDate: (formData.get('currentDate') as string | null) || request.headers.get('x-client-date') || undefined,
       userTimezone: request.headers.get('x-user-timezone') || (formData.get('timezone') as string | null) || (formData.get('userTimezone') as string | null) || undefined,
@@ -156,6 +161,7 @@ async function parseExtractionRequest(request: Request): Promise<{
   return {
     text: typeof body.text === 'string' ? body.text : undefined,
     url: typeof body.url === 'string' ? body.url : undefined,
+    clientSource: typeof body.source === 'string' ? body.source.trim() || undefined : undefined,
     idempotencyKey: (request.headers.get('idempotency-key') || (typeof body.idempotencyKey === 'string' ? body.idempotencyKey : null)),
     currentDate: (typeof body.currentDate === 'string' ? body.currentDate : request.headers.get('x-client-date') || undefined),
     userTimezone: request.headers.get('x-user-timezone') || (typeof body.timezone === 'string' ? body.timezone : typeof body.userTimezone === 'string' ? body.userTimezone : undefined),
@@ -174,6 +180,7 @@ async function processExtraction(options: {
   requestId: string;
   currentDate?: string;
   userTimezone?: string;
+  clientSource?: string;
 }): Promise<ExtractionResponse> {
   const startTime = Date.now();
   const { userId, userTier, text, image, idempotencyKey, quota, requestId } = options;
@@ -208,6 +215,7 @@ async function processExtraction(options: {
     const saved = await saveExtractedItem(userId, payload, sourceType, inputSnippet, {
       text: rawText || undefined,
       url: explicitUrl,
+      clientSource: options.clientSource || null,
       userTimezone: options.userTimezone,
       currentDate: options.currentDate,
       imageMimeType: image?.mimeType,
@@ -236,6 +244,7 @@ async function processExtraction(options: {
           hasImage: cached.hasImage,
           hasText: cached.hasText,
           hasUrl: cached.hasUrl,
+          clientSource: cached.clientSource,
           userId,
           userTier,
           cached: true,
@@ -246,7 +255,7 @@ async function processExtraction(options: {
     }
   }
 
-  const payloadHash = computePayloadHash(userId, userTier, rawText, explicitUrl, image?.buffer);
+  const payloadHash = computePayloadHash(userId, userTier, rawText, explicitUrl, options.clientSource, image?.buffer);
   const cachedPayload = await getCachedEntry(PAYLOAD_DEDUPE_COLLECTION, payloadHash, PAYLOAD_DEDUPE_WINDOW_MS);
   if (cachedPayload) {
     const persistedToFirebase = userTier === 'premium' ? await persistPremiumCapture(cachedPayload.data) : false;
@@ -260,6 +269,7 @@ async function processExtraction(options: {
         hasImage: cachedPayload.hasImage,
         hasText: cachedPayload.hasText,
         hasUrl: cachedPayload.hasUrl,
+        clientSource: cachedPayload.clientSource,
         userId,
         userTier,
         cached: true,
@@ -321,6 +331,7 @@ async function processExtraction(options: {
     hasImage,
     hasText,
     hasUrl,
+    clientSource: options.clientSource || null,
   };
   if (idempKey) {
     await saveCachedEntry(IDEMPOTENCY_CACHE_COLLECTION, idempKey, cacheEntry);
@@ -522,6 +533,7 @@ export default {
             userTier: user.tier,
             text: parsed.text,
             url: parsed.url,
+            clientSource: parsed.clientSource,
             currentDate: parsed.currentDate || new Date().toISOString(),
             userTimezone: parsed.userTimezone || 'UTC',
             image: parsed.image,
