@@ -1,5 +1,8 @@
-import { AuthUser, ExtractedReminderData, ExtractionStrategy, LogEntry, QuotaInfo, StoredReminderItem, UserTier } from '../types.js';
+import { AuthUser, ExtractedReminderData, ExtractionStrategy, LogEntry, QuotaInfo, StoredReminderItem, SubscriptionEntitlement, SubscriptionStatus, UserTier } from '../types.js';
 import { getRuntimeConfig } from '../runtimeConfig.js';
+
+export const ANDROID_PUBLISHER_SCOPE = 'https://www.googleapis.com/auth/androidpublisher';
+const DATASTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
 
 interface FirestoreDocument {
   name?: string;
@@ -75,6 +78,8 @@ const RATE_LIMITS_COLLECTION = 'rateLimits';
 const LOGS_COLLECTION = 'logs';
 const IDEMPOTENCY_CACHE_COLLECTION = 'idempotencyCache';
 const PAYLOAD_DEDUPE_COLLECTION = 'payloadDedupeCache';
+const PURCHASE_TOKEN_MAP_COLLECTION = 'purchaseTokenMap';
+const BILLING_SUBSCRIPTION_DOC = 'current';
 const MAX_LOGS = 1000;
 const startTime = Date.now();
 
@@ -113,7 +118,7 @@ const CATEGORY_ALIAS_MAP: Record<string, ExtractedReminderData['category']> = {
   other: 'OTHER',
 };
 
-let accessTokenCache: AccessTokenCache | null = null;
+const accessTokenCacheByScope = new Map<string, AccessTokenCache>();
 
 function normalizeCategory(raw: unknown): ExtractedReminderData['category'] | null {
   if (typeof raw !== 'string') return null;
@@ -140,9 +145,11 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
-function getServiceAccountConfig(): ServiceAccountConfig {
+function getServiceAccountConfig(scope: string): ServiceAccountConfig {
   const runtime = getRuntimeConfig();
-  const rawJson = runtime.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const rawJson = scope === ANDROID_PUBLISHER_SCOPE
+    ? (runtime.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON || runtime.FIREBASE_SERVICE_ACCOUNT_JSON)
+    : runtime.FIREBASE_SERVICE_ACCOUNT_JSON;
   const projectId = runtime.FIREBASE_PROJECT_ID;
 
   if (!rawJson) {
@@ -165,17 +172,18 @@ function getServiceAccountConfig(): ServiceAccountConfig {
   };
 }
 
-async function getGoogleAccessToken(): Promise<AccessTokenCache> {
-  if (accessTokenCache && accessTokenCache.expiresAt > Date.now() + 60_000) {
-    return accessTokenCache;
+async function getGoogleAccessToken(scope: string): Promise<AccessTokenCache> {
+  const cached = accessTokenCacheByScope.get(scope);
+  if (cached && cached.expiresAt > Date.now() + 60_000) {
+    return cached;
   }
 
-  const serviceAccount = getServiceAccountConfig();
+  const serviceAccount = getServiceAccountConfig(scope);
   const header = { alg: 'RS256', typ: 'JWT' };
   const nowSeconds = Math.floor(Date.now() / 1000);
   const payload = {
     iss: serviceAccount.clientEmail,
-    scope: 'https://www.googleapis.com/auth/datastore',
+    scope,
     aud: 'https://oauth2.googleapis.com/token',
     iat: nowSeconds,
     exp: nowSeconds + 3600,
@@ -208,13 +216,19 @@ async function getGoogleAccessToken(): Promise<AccessTokenCache> {
   }
 
   const json = await response.json() as { access_token: string; expires_in: number };
-  accessTokenCache = {
+  const tokenCache: AccessTokenCache = {
     accessToken: json.access_token,
     expiresAt: Date.now() + json.expires_in * 1000,
     projectId: serviceAccount.projectId,
     clientEmail: serviceAccount.clientEmail,
   };
-  return accessTokenCache;
+  accessTokenCacheByScope.set(scope, tokenCache);
+  return tokenCache;
+}
+
+export async function getScopedAccessToken(scope: string): Promise<{ accessToken: string; projectId: string }> {
+  const token = await getGoogleAccessToken(scope);
+  return { accessToken: token.accessToken, projectId: token.projectId };
 }
 
 function toFirestoreValue(value: unknown): FirestoreValue {
@@ -282,7 +296,7 @@ function documentIdFromName(name?: string): string {
 }
 
 async function firestoreRequest(path: string, init?: RequestInit): Promise<Response> {
-  const token = await getGoogleAccessToken();
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
   const url = `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents/${path}`;
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token.accessToken}`);
@@ -323,7 +337,7 @@ async function deleteDocument(path: string): Promise<void> {
 }
 
 async function listDocuments<T = Record<string, unknown>>(collectionPath: string, options?: { pageSize?: number; orderBy?: string }): Promise<Array<T & { id?: string }>> {
-  const token = await getGoogleAccessToken();
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
   const url = new URL(`https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents/${collectionPath}`);
   if (options?.pageSize) {
     url.searchParams.set('pageSize', String(options.pageSize));
@@ -888,7 +902,7 @@ function parseTokenPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUser; bearerProvided: boolean } {
+export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUser; bearerProvided: boolean; isDevToken: boolean } {
   const authHeader = headers.get('authorization');
   const devUserId = headers.get('x-user-id') || url.searchParams.get('userId');
   const headerTier = (headers.get('x-user-tier') || '').toLowerCase() as UserTier;
@@ -902,6 +916,7 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
       const uid = parts.slice(3).join('_') || 'test-user-1';
       return {
         bearerProvided: true,
+        isDevToken: true,
         user: {
           uid,
           email: `${uid}@example.com`,
@@ -915,6 +930,7 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
     if (payload) {
       return {
         bearerProvided: true,
+        isDevToken: false,
         user: {
           uid: (payload.uid as string) || (payload.user_id as string) || (payload.sub as string) || 'token-user',
           email: (payload.email as string) || 'token-user@example.com',
@@ -927,6 +943,7 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
     const derivedTier: UserTier = headerTier || (token.includes('premium') ? 'premium' : 'free');
     return {
       bearerProvided: true,
+      isDevToken: false,
       user: {
         uid: devUserId || `user_${token.slice(0, 10).replace(/[^a-zA-Z0-9]/g, '') || 'anon'}`,
         email: 'user@remindly.internal',
@@ -938,6 +955,7 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
   if (devUserId) {
     return {
       bearerProvided: false,
+      isDevToken: false,
       user: {
         uid: devUserId,
         email: `${devUserId}@remindly.internal`,
@@ -949,6 +967,7 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
 
   return {
     bearerProvided: false,
+    isDevToken: false,
     user: {
       uid: 'demo_guest_user',
       email: 'guest@remindly.ai',
@@ -957,4 +976,54 @@ export function authenticateHeaders(headers: Headers, url: URL): { user: AuthUse
       isAnonymous: true,
     },
   };
+}
+
+export async function getUserEntitlement(userId: string): Promise<SubscriptionEntitlement | null> {
+  const doc = await getDocument<SubscriptionEntitlement>(documentPath('users', userId, 'billing', BILLING_SUBSCRIPTION_DOC));
+  if (!doc) {
+    return null;
+  }
+  return {
+    userId: doc.userId || userId,
+    tier: doc.tier === 'premium' ? 'premium' : 'free',
+    productId: doc.productId || '',
+    purchaseToken: doc.purchaseToken || '',
+    orderId: doc.orderId ?? null,
+    status: (doc.status as SubscriptionStatus) || 'unknown',
+    autoRenewing: Boolean(doc.autoRenewing),
+    expiryTimeMillis: typeof doc.expiryTimeMillis === 'number' ? doc.expiryTimeMillis : null,
+    startTimeMillis: typeof doc.startTimeMillis === 'number' ? doc.startTimeMillis : null,
+    source: 'google_play',
+    updatedAt: doc.updatedAt || new Date(0).toISOString(),
+  };
+}
+
+export async function saveUserEntitlement(entitlement: SubscriptionEntitlement): Promise<void> {
+  await setDocument(documentPath('users', entitlement.userId, 'billing', BILLING_SUBSCRIPTION_DOC), entitlement as unknown as Record<string, unknown>);
+}
+
+export async function mapPurchaseTokenToUser(purchaseToken: string, userId: string, productId: string): Promise<void> {
+  await setDocument(documentPath(PURCHASE_TOKEN_MAP_COLLECTION, purchaseToken), {
+    userId,
+    productId,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function getUserIdForPurchaseToken(purchaseToken: string): Promise<string | null> {
+  const doc = await getDocument<{ userId?: string }>(documentPath(PURCHASE_TOKEN_MAP_COLLECTION, purchaseToken));
+  return doc?.userId || null;
+}
+
+export function isEntitlementActive(entitlement: SubscriptionEntitlement | null): boolean {
+  if (!entitlement || entitlement.tier !== 'premium') {
+    return false;
+  }
+  if (entitlement.status === 'on_hold' || entitlement.status === 'paused' || entitlement.status === 'expired' || entitlement.status === 'revoked') {
+    return false;
+  }
+  if (entitlement.expiryTimeMillis !== null && entitlement.expiryTimeMillis < Date.now()) {
+    return false;
+  }
+  return true;
 }

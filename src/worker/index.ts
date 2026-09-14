@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { extractWithGemini } from '../server/geminiExtractor.js';
 import { extractUrls, fetchUrlContent, hasSufficientTextDetail } from '../server/urlFetcher.js';
 import { setRuntimeConfig, type RuntimeConfig } from '../runtimeConfig.js';
-import { ExtractedReminderData, ExtractionResponse, QuotaInfo, UserTier } from '../types.js';
+import { ExtractedReminderData, ExtractionResponse, QuotaInfo, SubscriptionEntitlement, UserTier } from '../types.js';
 import {
   IDEMPOTENCY_CACHE_COLLECTION,
   PAYLOAD_DEDUPE_COLLECTION,
@@ -15,15 +15,22 @@ import {
   getCachedEntry,
   getQuotaInfo,
   getRecentLogs,
+  getUserEntitlement,
+  getUserIdForPurchaseToken,
   getUserItems,
+  isEntitlementActive,
   logOperation,
+  mapPurchaseTokenToUser,
   requestPasswordReset,
   resetAllQuotas,
   resetUserQuota,
   saveCachedEntry,
   saveExtractedItem,
+  saveUserEntitlement,
   updateUserItem,
 } from './firestoreRest.js';
+import { decodeRtdnMessage, verifyGooglePlaySubscription } from './googlePlay.js';
+import { verifyPubSubOidcToken } from './pubsubAuth.js';
 
 interface AssetsBinding {
   fetch(request: Request): Promise<Response>;
@@ -416,8 +423,88 @@ export default {
         });
       }
 
+      if (pathname === '/v1/billing/rtdn' && request.method === 'POST') {
+        if (env.RTDN_EXPECTED_AUDIENCE) {
+          try {
+            await verifyPubSubOidcToken(request.headers.get('authorization'), {
+              expectedAudience: env.RTDN_EXPECTED_AUDIENCE,
+              expectedServiceAccountEmail: env.RTDN_EXPECTED_SERVICE_ACCOUNT_EMAIL,
+            });
+          } catch (error) {
+            return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Pub/Sub token verification failed.' }, { status: 401 });
+          }
+        } else {
+          const providedToken = url.searchParams.get('token') || request.headers.get('x-rtdn-token');
+          if (env.RTDN_WEBHOOK_TOKEN && providedToken !== env.RTDN_WEBHOOK_TOKEN) {
+            return jsonResponse({ success: false, error: 'Unauthorized RTDN webhook call.' }, { status: 401 });
+          }
+        }
+
+        const pushBody = await request.json().catch(() => null) as { message?: { data?: string } } | null;
+        const rawData = pushBody?.message?.data;
+        if (!rawData) {
+          // Acknowledge malformed/validation pushes so Pub/Sub does not retry indefinitely.
+          return jsonResponse({ success: true, ignored: true });
+        }
+
+        try {
+          const notification = decodeRtdnMessage(rawData);
+          const subNotification = notification.subscriptionNotification;
+          if (!subNotification) {
+            return jsonResponse({ success: true, ignored: true });
+          }
+
+          const mappedUserId = await getUserIdForPurchaseToken(subNotification.purchaseToken);
+          if (!mappedUserId) {
+            ctx.waitUntil(logOperation({
+              requestId,
+              userId: 'system',
+              userTier: 'free',
+              endpoint: '/v1/billing/rtdn',
+              method: 'POST',
+              statusCode: 200,
+              latencyMs: 0,
+              hasText: false,
+              hasImage: false,
+              hasUrl: false,
+              cached: false,
+              error: `No user mapping for purchaseToken (notificationType=${subNotification.notificationType}).`,
+            }));
+            return jsonResponse({ success: true, ignored: true });
+          }
+
+          const verification = await verifyGooglePlaySubscription(subNotification.purchaseToken, subNotification.subscriptionId);
+          const entitlement: SubscriptionEntitlement = {
+            userId: mappedUserId,
+            tier: verification.isEntitled ? 'premium' : 'free',
+            productId: verification.productId,
+            purchaseToken: verification.purchaseToken,
+            orderId: verification.orderId,
+            status: verification.status,
+            autoRenewing: verification.autoRenewing,
+            expiryTimeMillis: verification.expiryTimeMillis,
+            startTimeMillis: verification.startTimeMillis,
+            source: 'google_play',
+            updatedAt: new Date().toISOString(),
+          };
+          await saveUserEntitlement(entitlement);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'RTDN processing failed.' }, { status: 500 });
+        }
+      }
+
       const auth = authenticateHeaders(request.headers, url);
-      const user = auth.user;
+      let user = auth.user;
+
+      if (!auth.isDevToken) {
+        try {
+          const entitlement = await getUserEntitlement(user.uid);
+          user = { ...user, tier: isEntitlementActive(entitlement) ? 'premium' : 'free' };
+        } catch {
+          // Firestore/service account unavailable; fall back to the header-derived tier.
+        }
+      }
 
       if (pathname === '/v1/quota' && request.method === 'GET') {
         const quota = await getQuotaInfo(user.uid, user.tier);
@@ -434,6 +521,44 @@ export default {
           await resetUserQuota(userId);
         }
         return jsonResponse({ success: true, message: resetAll ? 'All quotas reset' : `Quota reset for user ${userId}` });
+      }
+
+      if (pathname === '/v1/billing/verify-purchase' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const purchaseToken = typeof body.purchaseToken === 'string' ? body.purchaseToken.trim() : '';
+        const productId = typeof body.productId === 'string' ? body.productId.trim() : undefined;
+        if (!purchaseToken) {
+          return jsonResponse({ success: false, error: 'purchaseToken is required.' }, { status: 400 });
+        }
+
+        try {
+          const verification = await verifyGooglePlaySubscription(purchaseToken, productId);
+          const entitlement: SubscriptionEntitlement = {
+            userId: user.uid,
+            tier: verification.isEntitled ? 'premium' : 'free',
+            productId: verification.productId,
+            purchaseToken: verification.purchaseToken,
+            orderId: verification.orderId,
+            status: verification.status,
+            autoRenewing: verification.autoRenewing,
+            expiryTimeMillis: verification.expiryTimeMillis,
+            startTimeMillis: verification.startTimeMillis,
+            source: 'google_play',
+            updatedAt: new Date().toISOString(),
+          };
+          await Promise.all([
+            saveUserEntitlement(entitlement),
+            mapPurchaseTokenToUser(purchaseToken, user.uid, verification.productId),
+          ]);
+          return jsonResponse({ success: true, entitlement });
+        } catch (error) {
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Purchase verification failed.' }, { status: 502 });
+        }
+      }
+
+      if (pathname === '/v1/billing/entitlement' && request.method === 'GET') {
+        const entitlement = await getUserEntitlement(user.uid).catch(() => null);
+        return jsonResponse({ success: true, userId: user.uid, tier: user.tier, entitlement });
       }
 
       if (pathname === '/v1/logs' && request.method === 'GET') {

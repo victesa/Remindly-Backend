@@ -132,3 +132,27 @@ export interface AuthUser {
   name?: string;
   isAnonymous?: boolean;
 }
+
+export type SubscriptionStatus =
+  | 'active'
+  | 'in_grace_period'
+  | 'on_hold'
+  | 'paused'
+  | 'canceled'
+  | 'expired'
+  | 'revoked'
+  | 'unknown';
+
+export interface SubscriptionEntitlement {
+  userId: string;
+  tier: UserTier;
+  productId: string;
+  purchaseToken: string;
+  orderId: string | null;
+  status: SubscriptionStatus;
+  autoRenewing: boolean;
+  expiryTimeMillis: number | null;
+  startTimeMillis: number | null;
+  source: 'google_play';
+  updatedAt: string;
+}

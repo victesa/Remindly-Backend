@@ -41,6 +41,9 @@ This project is configured to deploy as a Cloudflare Worker with static SPA asse
    `npx wrangler secret put GEMINI_API_KEY`
    `npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON`
    `npx wrangler secret put FIREBASE_PROJECT_ID`
+   `npx wrangler secret put GOOGLE_PLAY_PACKAGE_NAME`
+   `npx wrangler secret put GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` (optional; falls back to `FIREBASE_SERVICE_ACCOUNT_JSON`)
+   `npx wrangler secret put RTDN_WEBHOOK_TOKEN`
 4. Generate Worker binding types after config changes:
    `npm run types:worker`
 5. Start local Worker dev:
@@ -51,3 +54,21 @@ This project is configured to deploy as a Cloudflare Worker with static SPA asse
 Notes:
 - Use `.dev.vars` for local Worker-only secrets. It is gitignored.
 - `.env` files remain local-only and are gitignored.
+
+## Google Play Subscription Verification
+
+The Worker verifies Google Play subscriptions server-to-server and stores the resulting entitlement in Firestore under `users/{uid}/billing/current`. Client-supplied `X-User-Tier` headers are ignored for real (non-playground) tokens; the stored entitlement is the source of truth.
+
+Setup:
+1. In Play Console, grant your service account (Firebase's or a dedicated one) API access under **Users and permissions**, with **Financial data** view permission.
+2. Set `GOOGLE_PLAY_PACKAGE_NAME` to your Android application ID.
+3. Configure a Pub/Sub topic for Real-Time Developer Notifications in Play Console > **Monetization setup**, and create a push subscription pointing to:
+   `https://<your-worker-domain>/v1/billing/rtdn`
+4. Recommended: enable authenticated push on the subscription (assign an invoker service account and set the audience to your webhook URL), then set `RTDN_EXPECTED_AUDIENCE` to that same URL. The Worker verifies the push request's OIDC token against Google's public JWKS (issuer, audience, signature, expiry) instead of relying on a shared secret. Optionally set `RTDN_EXPECTED_SERVICE_ACCOUNT_EMAIL` to pin the exact invoker identity.
+5. If you skip authenticated push, set `RTDN_WEBHOOK_TOKEN` and append `?token=<value>` to the subscription URL as a fallback (weaker: a shared secret, not a verified identity).
+
+Endpoints:
+- `POST /v1/billing/verify-purchase` — body `{ "purchaseToken": "...", "productId": "..." }`. Verifies with Google Play, persists the entitlement, and maps the purchase token to the authenticated `uid` (call this right after your app receives a purchase token from the Play Billing Library).
+- `GET /v1/billing/entitlement` — returns the caller's stored entitlement (used for cross-device sync).
+- `POST /v1/billing/rtdn` — Pub/Sub push endpoint. Looks up the `uid` from the purchase-token mapping, re-verifies with Google Play, and updates the stored entitlement automatically on renewal, cancellation, grace period, hold, or expiry.
+
