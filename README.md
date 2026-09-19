@@ -55,7 +55,9 @@ Notes:
 - Use `.dev.vars` for local Worker-only secrets. It is gitignored.
 - `.env` files remain local-only and are gitignored.
 
-Extraction quotas are tracked per authenticated Firebase user in Firestore under `rateLimits/{uid}`. The free tier allows 5 extractions per UTC calendar month, and the premium tier allows 250. The quota is shared across the user's devices and resets at the start of the next UTC month.
+Extraction quotas are tracked per authenticated Firebase user in Firestore under `rateLimits/{uid}`. The Free tier allows 5 AI extractions per rolling 30-day window; Pro allows 250. The quota is shared across the user's devices. Free image captures have a separate 5-per-window limit; Pro image captures use the normal 250 extraction allowance. Free text is limited to 10,000 characters and Pro text to 100,000 characters. Uploads are limited to 10 MB for Free and 25 MB for Pro. PDF page selection/extraction is performed by the client in the current Worker architecture; the Worker receives the resulting text and enforces the tier text limit.
+
+Authenticated clients can use `GET /v1/me` (or `/v1/user/profile`) to receive the verified user identity, subscription state, and quota in one response. After purchase verification or an RTDN update, the Worker also attempts to set the Firebase Auth custom claim `{ "tier": "premium" }` or `{ "tier": "free" }`. Firebase custom claims appear only in a newly issued or refreshed ID token, so the client should call `getIdToken(true)` after purchase verification; the backend still uses the Firestore entitlement as its authoritative source.
 
 ## Google Play Subscription Verification
 

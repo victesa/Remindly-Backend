@@ -37,6 +37,8 @@ export interface ExtractedReminderData {
 export interface QuotaInfo {
   limit: number;
   remaining: number;
+  imageLimit: number;
+  imageRemaining: number;
   resetInSeconds: number;
   tier: UserTier;
   windowSizeSeconds: number;

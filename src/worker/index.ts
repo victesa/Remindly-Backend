@@ -33,6 +33,8 @@ import {
 import { decodeRtdnMessage, verifyGooglePlaySubscription } from './googlePlay.js';
 import { verifyPubSubOidcToken } from './pubsubAuth.js';
 import { verifyFirebaseIdToken } from './firebaseAuth.js';
+import { setFirebaseTierClaim } from './firebaseClaims.js';
+import { precheckText } from './contentPrecheck.js';
 
 interface AssetsBinding {
   fetch(request: Request): Promise<Response>;
@@ -63,7 +65,6 @@ interface CachedEntry {
 
 const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
 const PAYLOAD_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg']);
 const inFlightRequests = new Map<string, Promise<ExtractedReminderData>>();
 
@@ -126,7 +127,7 @@ function computePayloadHash(
   return hash.digest('hex');
 }
 
-async function parseExtractionRequest(request: Request): Promise<{
+async function parseExtractionRequest(request: Request, userTier: UserTier): Promise<{
   text?: string;
   url?: string;
   clientSource?: string;
@@ -140,13 +141,14 @@ async function parseExtractionRequest(request: Request): Promise<{
     const formData = await request.formData();
     const fileEntry = formData.get('image');
     let image: ExtractionImage | null = null;
+    const maxUploadBytes = userTier === 'premium' ? 25 * 1024 * 1024 : 10 * 1024 * 1024;
 
     if (fileEntry instanceof File) {
       if (!ALLOWED_MIME_TYPES.has(fileEntry.type)) {
         throw new Error(`Unsupported file type: ${fileEntry.type}. Allowed: JPEG, PNG, WEBP, GIF`);
       }
-      if (fileEntry.size > MAX_UPLOAD_BYTES) {
-        throw new Error(`Upload error: File too large. Max 10MB allowed.`);
+      if (fileEntry.size > maxUploadBytes) {
+        throw new Error(`Upload error: File too large. Max ${userTier === 'premium' ? '25MB' : '10MB'} allowed.`);
       }
       image = {
         buffer: Buffer.from(await fileEntry.arrayBuffer()),
@@ -527,6 +529,7 @@ export default {
           };
           rtdnStage = 'entitlement-storage';
           await saveUserEntitlement(entitlement);
+          await setFirebaseTierClaim(entitlement.userId, entitlement.tier).catch(() => undefined);
           return jsonResponse({ success: true });
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'RTDN processing failed.';
@@ -555,6 +558,26 @@ export default {
       }
 
       const auth = { bearerProvided: true };
+
+      if ((pathname === '/v1/me' || pathname === '/v1/user/profile') && request.method === 'GET') {
+        const quota = await getQuotaInfo(user.uid, user.tier);
+        const entitlement = await getUserEntitlement(user.uid).catch(() => null);
+        return jsonResponse({
+          success: true,
+          user: {
+            uid: user.uid,
+            email: user.email,
+            name: user.name,
+          },
+          subscription: {
+            tier: user.tier,
+            status: entitlement?.status || 'none',
+            productId: entitlement?.productId || null,
+            expiryTimeMillis: entitlement?.expiryTimeMillis || null,
+          },
+          quota,
+        });
+      }
 
       if (pathname === '/v1/quota' && request.method === 'GET') {
         const quota = await getQuotaInfo(user.uid, user.tier);
@@ -602,6 +625,7 @@ export default {
             saveUserEntitlement(entitlement),
             mapPurchaseTokenToUser(purchaseToken, user.uid, verification.productId),
           ]);
+          await setFirebaseTierClaim(user.uid, entitlement.tier).catch(() => undefined);
           return jsonResponse({ success: true, entitlement });
         } catch (error) {
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Purchase verification failed.' }, { status: 502 });
@@ -708,10 +732,17 @@ export default {
       }
 
       if (pathname === '/v1/extract-data' && request.method === 'POST') {
-        const parsed = await parseExtractionRequest(request);
+        const parsed = await parseExtractionRequest(request, user.tier);
+        const precheck = precheckText(parsed.text, user.tier);
+        if (!precheck.allowed) {
+          return jsonResponse({
+            success: false,
+            error: 'Input is too large to process.',
+          }, { status: 422 });
+        }
         let quotaResult: Awaited<ReturnType<typeof consumeQuota>>;
         try {
-          quotaResult = await consumeQuota(user.uid, user.tier);
+          quotaResult = await consumeQuota(user.uid, user.tier, Boolean(parsed.image));
         } catch (error) {
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Quota service unavailable.' }, { status: 503 });
         }

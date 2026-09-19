@@ -2,6 +2,7 @@ import { AuthUser, ExtractedReminderData, ExtractionStrategy, LogEntry, QuotaInf
 import { getRuntimeConfig } from '../runtimeConfig.js';
 
 export const ANDROID_PUBLISHER_SCOPE = 'https://www.googleapis.com/auth/androidpublisher';
+export const IDENTITY_TOOLKIT_SCOPE = 'https://www.googleapis.com/auth/identitytoolkit';
 const DATASTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
 
 interface FirestoreDocument {
@@ -42,8 +43,8 @@ interface CachedEntry {
 
 interface RateLimitRecord {
   timestamps: number[];
+  imageTimestamps?: number[];
   customLimit?: number;
-  periodKey?: string;
 }
 
 interface AnalyticsUserRecord {
@@ -98,10 +99,11 @@ const ANALYTICS_CAPTURES_COLLECTION = 'analyticsCaptures';
 const MAX_LOGS = 1000;
 const startTime = Date.now();
 
-const TIER_LIMITS: Record<UserTier, { limit: number }> = {
-  free: { limit: 5 },
-  premium: { limit: 250 },
+const TIER_LIMITS: Record<UserTier, { limit: number; imageLimit: number }> = {
+  free: { limit: 5, imageLimit: 5 },
+  premium: { limit: 250, imageLimit: 250 },
 };
+const QUOTA_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const CATEGORY_ALIAS_MAP: Record<string, ExtractedReminderData['category']> = {
   job: 'JOB',
@@ -496,6 +498,7 @@ async function getOrCreateRateLimitRecord(userId: string): Promise<RateLimitReco
   if (existing) {
     return {
       timestamps: Array.isArray(existing.timestamps) ? existing.timestamps : [],
+      imageTimestamps: Array.isArray(existing.imageTimestamps) ? existing.imageTimestamps : [],
       customLimit: existing.customLimit,
     };
   }
@@ -509,53 +512,51 @@ async function saveRateLimitRecord(userId: string, record: RateLimitRecord): Pro
   await setDocument(documentPath(RATE_LIMITS_COLLECTION, userId), record as unknown as Record<string, unknown>);
 }
 
-function utcPeriodKey(date = new Date()): string {
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function nextUtcMonthStart(date = new Date()): number {
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
-}
-
 export async function getQuotaInfo(userId: string, tier: UserTier): Promise<QuotaInfo> {
   const now = Date.now();
   const config = TIER_LIMITS[tier] || TIER_LIMITS.free;
   const record = await getOrCreateRateLimitRecord(userId);
-  const periodKey = utcPeriodKey();
-  if (record.periodKey !== periodKey) {
-    record.timestamps = [];
-    record.periodKey = periodKey;
-  }
+  const windowStart = now - QUOTA_WINDOW_MS;
+  record.timestamps = record.timestamps.filter((timestamp) => timestamp > windowStart);
+  record.imageTimestamps = (record.imageTimestamps || []).filter((timestamp) => timestamp > windowStart);
   await saveRateLimitRecord(userId, record);
 
   const limit = record.customLimit ?? config.limit;
   const count = record.timestamps.length;
   const remaining = Math.max(0, limit - count);
-  const resetInMs = Math.max(0, nextUtcMonthStart() - now);
+  const oldest = record.timestamps[0];
+  const resetInMs = oldest ? Math.max(0, oldest + QUOTA_WINDOW_MS - now) : QUOTA_WINDOW_MS;
+  const imageCount = record.imageTimestamps.length;
 
   return {
     limit,
     remaining,
+    imageLimit: config.imageLimit,
+    imageRemaining: Math.max(0, config.imageLimit - imageCount),
     resetInSeconds: Math.ceil(resetInMs / 1000),
     tier,
-    windowSizeSeconds: Math.ceil((nextUtcMonthStart() - Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)) / 1000),
+    windowSizeSeconds: Math.floor(QUOTA_WINDOW_MS / 1000),
   };
 }
 
-export async function consumeQuota(userId: string, tier: UserTier): Promise<{ allowed: boolean; quota: QuotaInfo }> {
+export async function consumeQuota(userId: string, tier: UserTier, hasImage = false): Promise<{ allowed: boolean; quota: QuotaInfo }> {
   const quota = await getQuotaInfo(userId, tier);
-  if (quota.remaining <= 0) {
+  if (quota.remaining <= 0 || (hasImage && quota.imageRemaining <= 0)) {
     return { allowed: false, quota };
   }
 
   const record = await getOrCreateRateLimitRecord(userId);
   record.timestamps.push(Date.now());
+  if (hasImage) {
+    record.imageTimestamps = [...(record.imageTimestamps || []), Date.now()];
+  }
   await saveRateLimitRecord(userId, record);
   return {
     allowed: true,
     quota: {
       ...quota,
       remaining: quota.remaining - 1,
+      imageRemaining: hasImage ? quota.imageRemaining - 1 : quota.imageRemaining,
     },
   };
 }
