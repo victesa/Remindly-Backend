@@ -93,6 +93,8 @@ export interface StoredReminderItem {
   inputSnippet: string;
   data: ExtractedReminderData;
   persistedSource: 'firestore' | 'memory';
+  isDeleted?: boolean;
+  deletedAt?: string | null;
   source?: {
     contentType: 'TEXT' | 'URL' | 'IMAGE' | 'MULTIMODAL';
     clientSource?: string | null;

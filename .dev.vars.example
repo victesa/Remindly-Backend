@@ -22,3 +22,9 @@ RTDN_EXPECTED_AUDIENCE=
 
 # RTDN_EXPECTED_SERVICE_ACCOUNT_EMAIL: (Optional) Restrict RTDN verification to a specific Pub/Sub push service account.
 RTDN_EXPECTED_SERVICE_ACCOUNT_EMAIL=
+
+# ANALYTICS_ADMIN_KEY: Secret required to read /v1/analytics/summary.
+ANALYTICS_ADMIN_KEY=
+
+# Local-only test-token support. Keep false or unset in deployed environments.
+ALLOW_DEV_AUTH=true

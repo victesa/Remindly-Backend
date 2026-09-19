@@ -45,6 +45,18 @@ interface RateLimitRecord {
   customLimit?: number;
 }
 
+interface AnalyticsUserRecord {
+  userId: string;
+  tier: UserTier;
+  status: SubscriptionStatus;
+  productId: string;
+  expiryTimeMillis: number | null;
+  firstSeenAt: string;
+  lastUpdatedAt: string;
+  churnedAt?: string | null;
+  reactivatedAt?: string | null;
+}
+
 type EditableItemState = 'OPEN' | 'DONE';
 
 type SourceType = 'text' | 'image' | 'url' | 'multimodal';
@@ -80,6 +92,8 @@ const IDEMPOTENCY_CACHE_COLLECTION = 'idempotencyCache';
 const PAYLOAD_DEDUPE_COLLECTION = 'payloadDedupeCache';
 const PURCHASE_TOKEN_MAP_COLLECTION = 'purchaseTokenMap';
 const BILLING_SUBSCRIPTION_DOC = 'current';
+const ANALYTICS_USERS_COLLECTION = 'analyticsUsers';
+const ANALYTICS_CAPTURES_COLLECTION = 'analyticsCaptures';
 const MAX_LOGS = 1000;
 const startTime = Date.now();
 
@@ -346,23 +360,79 @@ async function listDocuments<T = Record<string, unknown>>(collectionPath: string
     url.searchParams.set('orderBy', options.orderBy);
   }
 
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token.accessToken}`,
-    },
-  });
+  const documents: FirestoreDocument[] = [];
+  let pageToken: string | undefined;
 
-  if (response.status === 404) {
-    return [];
-  }
-  if (!response.ok) {
-    throw new Error(`Firestore list failed: HTTP ${response.status}`);
-  }
-  const json = await response.json() as { documents?: FirestoreDocument[] };
-  return (json.documents || []).map((document) => ({
+  do {
+    if (pageToken) {
+      url.searchParams.set('pageToken', pageToken);
+    }
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token.accessToken}`,
+      },
+    });
+
+    if (response.status === 404) {
+      return [];
+    }
+    if (!response.ok) {
+      throw new Error(`Firestore list failed: HTTP ${response.status}`);
+    }
+    const json = await response.json() as { documents?: FirestoreDocument[]; nextPageToken?: string };
+    documents.push(...(json.documents || []));
+    pageToken = json.nextPageToken;
+  } while (pageToken);
+
+  return documents.map((document) => ({
     ...decodeDocument<T>(document),
     id: documentIdFromName(document.name),
   }));
+}
+
+async function queryDocumentsSince<T = Record<string, unknown>>(
+  parentPath: string,
+  collectionId: string,
+  fieldPath: string,
+  since: string,
+): Promise<Array<T & { id?: string }>> {
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+  const queryUrl = parentPath
+    ? `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents/${parentPath}:runQuery`
+    : `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents:runQuery`;
+  const url = queryUrl;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath },
+            op: 'GREATER_THAN',
+            value: { stringValue: since },
+          },
+        },
+        orderBy: [{ field: { fieldPath }, direction: 'ASCENDING' }],
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Firestore delta query failed: HTTP ${response.status}`);
+  }
+
+  const rows = await response.json() as Array<{ document?: FirestoreDocument }>;
+  return rows
+    .filter((row) => row.document)
+    .map((row) => ({
+      ...decodeDocument<T>(row.document as FirestoreDocument),
+      id: documentIdFromName(row.document?.name),
+    }));
 }
 
 function toStoredItem(userId: string, docId: string, docData: Record<string, unknown>): StoredReminderItem {
@@ -398,6 +468,8 @@ function toStoredItem(userId: string, docId: string, docData: Record<string, unk
     inputSnippet: typeof docData.inputSnippet === 'string' ? docData.inputSnippet : '',
     data: resolvedData,
     persistedSource: 'firestore',
+    isDeleted: docData.isDeleted === true,
+    deletedAt: typeof docData.deletedAt === 'string' ? docData.deletedAt : null,
     source: docData.source as StoredReminderItem['source'],
     createdAt: typeof docData.createdAt === 'string' ? docData.createdAt : extractedAt,
     updatedAt: typeof docData.updatedAt === 'string' ? docData.updatedAt : extractedAt,
@@ -407,18 +479,13 @@ function toStoredItem(userId: string, docId: string, docData: Record<string, unk
 
 async function getItemRefs(userId: string, itemId: string): Promise<{
   capturesPath: string;
-  itemsPath: string;
   capturesExists: boolean;
-  itemsExists: boolean;
 }> {
   const capturesPath = documentPath('users', userId, 'captures', itemId);
-  const itemsPath = documentPath('users', userId, 'items', itemId);
-  const [capture, item] = await Promise.all([getDocument(capturesPath), getDocument(itemsPath)]);
+  const capture = await getDocument(capturesPath);
   return {
     capturesPath,
-    itemsPath,
     capturesExists: Boolean(capture),
-    itemsExists: Boolean(item),
   };
 }
 
@@ -549,38 +616,16 @@ export async function saveExtractedItem(
     inputSnippet: inputSnippet.slice(0, 250),
     data,
     persistedSource: 'firestore',
+    isDeleted: false,
+    deletedAt: null,
     source,
     createdAt: nowIso,
     updatedAt: nowIso,
     metadata,
-  };
-
-  const legacyItem = {
-    id,
-    userId,
-    title: data.title,
-    summary: data.summary,
-    category: data.category,
-    deadline: data.deadline,
-    eventDate: data.eventDate,
-    organization: data.organization,
-    url: data.url || null,
-    strategy: data.strategy,
-    tier: data.tier,
-    confidenceScore: data.confidenceScore ?? null,
-    actionableItems: data.actionableItems || null,
-    sourceType,
-    inputSnippet: inputSnippet.slice(0, 250),
-    state: 'READY',
-    source,
-    metadata,
-    createdAt: nowIso,
-    updatedAt: nowIso,
   };
 
   await Promise.all([
     setDocument(documentPath('users', userId, 'captures', id), item as unknown as Record<string, unknown>),
-    setDocument(documentPath('users', userId, 'items', id), legacyItem as Record<string, unknown>),
     setDocument(documentPath('users', userId, 'item_debug', id), {
       itemId: id,
       uid: userId,
@@ -590,6 +635,16 @@ export async function saveExtractedItem(
     }),
   ]);
 
+  await setDocument(documentPath(ANALYTICS_CAPTURES_COLLECTION, id), {
+    captureId: id,
+    userId,
+    tier: data.tier,
+    source: context?.clientSource || 'unknown',
+    sourceType,
+    category: data.category,
+    capturedAt: nowIso,
+  }).catch(() => undefined);
+
   return {
     success: true,
     id,
@@ -598,15 +653,11 @@ export async function saveExtractedItem(
 }
 
 export async function getUserItems(userId: string, limit = 50): Promise<StoredReminderItem[]> {
-  const [captures, items, legacyCaptures] = await Promise.all([
-    listDocuments(documentPath('users', userId, 'captures'), { pageSize: limit * 4, orderBy: 'extractedAt desc' }).catch(() => []),
-    listDocuments(documentPath('users', userId, 'items'), { pageSize: limit * 4, orderBy: 'updatedAt desc' }).catch(() => []),
-    listDocuments('captures', { pageSize: limit * 4 }).catch(() => []),
-  ]);
+  const captures = await listDocuments(documentPath('users', userId, 'captures'), { pageSize: limit * 4, orderBy: 'extractedAt desc' }).catch(() => []);
 
   const deduped = new Map<string, StoredReminderItem>();
-  const all = [...captures, ...items, ...legacyCaptures.filter((doc) => doc.userId === userId)];
-  for (const doc of all) {
+  for (const doc of captures) {
+    if (doc.isDeleted === true) continue;
     const normalized = toStoredItem(userId, doc.id || '', doc as Record<string, unknown>);
     deduped.set(normalized.id, normalized);
   }
@@ -616,14 +667,47 @@ export async function getUserItems(userId: string, limit = 50): Promise<StoredRe
     .slice(0, limit);
 }
 
+export async function getUserItemsDelta(userId: string, since?: string): Promise<{
+  updatedItems: StoredReminderItem[];
+  deletedItemIds: string[];
+}> {
+  const parentPath = documentPath('users', userId);
+  const captures = since
+    ? await queryDocumentsSince(parentPath, 'captures', 'updatedAt', since)
+    : await listDocuments(documentPath('users', userId, 'captures'), { pageSize: 1000, orderBy: 'updatedAt desc' });
+
+  const deduped = new Map<string, StoredReminderItem>();
+  for (const doc of captures) {
+    if (doc.isDeleted === true) continue;
+    const normalized = toStoredItem(userId, doc.id || '', doc as Record<string, unknown>);
+    deduped.set(normalized.id, normalized);
+  }
+
+  let deletedItemIds: string[] = [];
+  if (since) {
+    const deletedCaptures = await queryDocumentsSince(parentPath, 'captures', 'deletedAt', since);
+    deletedItemIds = Array.from(new Set(
+      deletedCaptures
+        .filter((doc) => doc.isDeleted === true)
+        .map((doc) => doc.id || (doc as Record<string, unknown>).itemId as string)
+        .filter((id): id is string => Boolean(id)),
+    ));
+  }
+
+  return {
+    updatedItems: Array.from(deduped.values())
+      .sort((a, b) => new Date(b.updatedAt || b.extractedAt).getTime() - new Date(a.updatedAt || a.extractedAt).getTime()),
+    deletedItemIds,
+  };
+}
+
 export async function updateUserItem(userId: string, itemId: string, patch: UpdateItemInput): Promise<StoredReminderItem> {
   const refs = await getItemRefs(userId, itemId);
-  if (!refs.capturesExists && !refs.itemsExists) {
+  if (!refs.capturesExists) {
     throw new Error('Item not found.');
   }
 
-  const captureDoc = refs.capturesExists ? await getDocument<Record<string, unknown>>(refs.capturesPath) : null;
-  const itemsDoc = refs.itemsExists ? await getDocument<Record<string, unknown>>(refs.itemsPath) : null;
+  const captureDoc = await getDocument<Record<string, unknown>>(refs.capturesPath);
   const updatedAt = new Date().toISOString();
 
   if (patch.state !== undefined) {
@@ -632,7 +716,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
       throw new Error('Invalid state. Allowed values: OPEN, DONE.');
     }
     if (captureDoc) captureDoc.state = normalizedState;
-    if (itemsDoc) itemsDoc.state = normalizedState === 'OPEN' ? 'READY' : normalizedState;
   }
 
   if (patch.title !== undefined) {
@@ -642,7 +725,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).title = patch.title.trim();
     }
-    if (itemsDoc) itemsDoc.title = patch.title.trim();
   }
 
   if (patch.category !== undefined) {
@@ -653,7 +735,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).category = normalizedCategory;
     }
-    if (itemsDoc) itemsDoc.category = normalizedCategory;
   }
 
   if (patch.summary !== undefined) {
@@ -663,7 +744,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).summary = patch.summary === null ? null : patch.summary.trim();
     }
-    if (itemsDoc) itemsDoc.summary = patch.summary === null ? null : patch.summary.trim();
   }
 
   if (patch.deadline !== undefined) {
@@ -673,7 +753,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).deadline = patch.deadline;
     }
-    if (itemsDoc) itemsDoc.deadline = patch.deadline;
   }
 
   if (patch.eventDate !== undefined) {
@@ -683,7 +762,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).eventDate = patch.eventDate;
     }
-    if (itemsDoc) itemsDoc.eventDate = patch.eventDate;
   }
 
   if (patch.organization !== undefined) {
@@ -694,7 +772,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).organization = normalized;
     }
-    if (itemsDoc) itemsDoc.organization = normalized;
   }
 
   if (patch.url !== undefined) {
@@ -704,7 +781,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).url = patch.url;
     }
-    if (itemsDoc) itemsDoc.url = patch.url;
   }
 
   if (patch.actionableItems !== undefined) {
@@ -714,7 +790,6 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).actionableItems = patch.actionableItems;
     }
-    if (itemsDoc) itemsDoc.actionableItems = patch.actionableItems;
   }
 
   if (patch.confidenceScore !== undefined) {
@@ -724,42 +799,49 @@ export async function updateUserItem(userId: string, itemId: string, patch: Upda
     if (captureDoc && typeof captureDoc.data === 'object' && captureDoc.data) {
       (captureDoc.data as Record<string, unknown>).confidenceScore = patch.confidenceScore;
     }
-    if (itemsDoc) itemsDoc.confidenceScore = patch.confidenceScore;
   }
 
-  if (!captureDoc && !itemsDoc) {
+  if (!captureDoc) {
     throw new Error('No valid fields provided for update.');
   }
 
-  if (captureDoc) {
-    captureDoc.updatedAt = updatedAt;
-    await setDocument(refs.capturesPath, captureDoc);
-  }
-  if (itemsDoc) {
-    itemsDoc.updatedAt = updatedAt;
-    await setDocument(refs.itemsPath, itemsDoc);
-  }
+  captureDoc.updatedAt = updatedAt;
+  await setDocument(refs.capturesPath, captureDoc);
 
-  const updated = captureDoc || itemsDoc;
-  return toStoredItem(userId, itemId, updated as Record<string, unknown>);
+  return toStoredItem(userId, itemId, captureDoc);
 }
 
 export async function deleteUserItem(userId: string, itemId: string): Promise<boolean> {
   const refs = await getItemRefs(userId, itemId);
-  if (!refs.capturesExists && !refs.itemsExists) {
+  if (!refs.capturesExists) {
     return false;
   }
 
   await Promise.all([
-    refs.capturesExists ? deleteDocument(refs.capturesPath) : Promise.resolve(),
-    refs.itemsExists ? deleteDocument(refs.itemsPath) : Promise.resolve(),
-    deleteDocument(documentPath('users', userId, 'item_debug', itemId)),
+    markItemDeleted(refs.capturesPath),
+    setDocument(documentPath('users', userId, 'item_debug', itemId), {
+      itemId,
+      uid: userId,
+      isDeleted: true,
+      deletedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
   ]);
   return true;
 }
 
+async function markItemDeleted(path: string): Promise<void> {
+  const document = await getDocument<Record<string, unknown>>(path);
+  if (!document) return;
+  const deletedAt = new Date().toISOString();
+  document.isDeleted = true;
+  document.deletedAt = deletedAt;
+  document.updatedAt = deletedAt;
+  await setDocument(path, document);
+}
+
 export async function deleteUserData(userId: string): Promise<{ deletedCount: number }> {
-  const collections = ['captures', 'items', 'item_debug'];
+  const collections = ['captures', 'item_debug'];
   let deletedCount = 0;
 
   for (const collection of collections) {
@@ -1000,6 +1082,40 @@ export async function getUserEntitlement(userId: string): Promise<SubscriptionEn
 
 export async function saveUserEntitlement(entitlement: SubscriptionEntitlement): Promise<void> {
   await setDocument(documentPath('users', entitlement.userId, 'billing', BILLING_SUBSCRIPTION_DOC), entitlement as unknown as Record<string, unknown>);
+
+  try {
+    const now = entitlement.updatedAt || new Date().toISOString();
+    const analyticsPath = documentPath(ANALYTICS_USERS_COLLECTION, entitlement.userId);
+    const previous = await getDocument<AnalyticsUserRecord>(analyticsPath).catch(() => null);
+    const activeNow = isEntitlementActive(entitlement);
+    const activeBefore = previous ? isEntitlementActive({
+      userId: previous.userId,
+      tier: previous.tier,
+      productId: previous.productId,
+      purchaseToken: '',
+      orderId: null,
+      status: previous.status,
+      autoRenewing: false,
+      expiryTimeMillis: previous.expiryTimeMillis,
+      startTimeMillis: null,
+      source: 'google_play',
+      updatedAt: previous.lastUpdatedAt,
+    }) : false;
+
+    await setDocument(analyticsPath, {
+      userId: entitlement.userId,
+      tier: entitlement.tier,
+      status: entitlement.status,
+      productId: entitlement.productId,
+      expiryTimeMillis: entitlement.expiryTimeMillis,
+      firstSeenAt: previous?.firstSeenAt || now,
+      lastUpdatedAt: now,
+      churnedAt: activeBefore && !activeNow ? now : (previous?.churnedAt || null),
+      reactivatedAt: !activeBefore && activeNow && previous ? now : (previous?.reactivatedAt || null),
+    });
+  } catch {
+    // Analytics must not block a verified entitlement update.
+  }
 }
 
 export async function mapPurchaseTokenToUser(purchaseToken: string, userId: string, productId: string): Promise<void> {
@@ -1026,4 +1142,76 @@ export function isEntitlementActive(entitlement: SubscriptionEntitlement | null)
     return false;
   }
   return true;
+}
+
+export async function getAnalyticsSummary(since?: string): Promise<Record<string, unknown>> {
+  const sinceIso = since || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const untilIso = new Date().toISOString();
+  const [userRecords, captureRecords] = await Promise.all([
+    listDocuments<AnalyticsUserRecord>(ANALYTICS_USERS_COLLECTION, { pageSize: 5000 }),
+    listDocuments<Record<string, unknown>>(ANALYTICS_CAPTURES_COLLECTION, { pageSize: 10000 }),
+  ]);
+
+  const toEntitlement = (record: AnalyticsUserRecord): SubscriptionEntitlement => ({
+    userId: record.userId,
+    tier: record.tier,
+    productId: record.productId,
+    purchaseToken: '',
+    orderId: null,
+    status: record.status,
+    autoRenewing: false,
+    expiryTimeMillis: record.expiryTimeMillis,
+    startTimeMillis: null,
+    source: 'google_play',
+    updatedAt: record.lastUpdatedAt,
+  });
+
+  const activeProUsers = userRecords.filter((record) => isEntitlementActive(toEntitlement(record)));
+  const churnedUsers = userRecords.filter((record) => record.churnedAt);
+  const captures = captureRecords.filter((record) => {
+    const capturedAt = typeof record.capturedAt === 'string' ? record.capturedAt : '';
+    return capturedAt >= sinceIso && capturedAt <= untilIso;
+  });
+
+  const sourceCounts: Record<string, number> = {};
+  const sourceTypeCounts: Record<string, number> = {};
+  const categoryCounts: Record<string, number> = {};
+  const dailyCounts: Record<string, number> = {};
+  const captureUsers = new Set<string>();
+  for (const record of captures) {
+    const source = typeof record.source === 'string' && record.source.trim() ? record.source : 'unknown';
+    const sourceType = typeof record.sourceType === 'string' ? record.sourceType : 'unknown';
+    const category = typeof record.category === 'string' ? record.category : 'OTHER';
+    const capturedAt = typeof record.capturedAt === 'string' ? record.capturedAt : untilIso;
+    const day = capturedAt.slice(0, 10);
+    sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+    sourceTypeCounts[sourceType] = (sourceTypeCounts[sourceType] || 0) + 1;
+    categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+    dailyCounts[day] = (dailyCounts[day] || 0) + 1;
+    if (typeof record.userId === 'string') captureUsers.add(record.userId);
+  }
+
+  const rank = (counts: Record<string, number>) => Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => ({ key, count }));
+
+  return {
+    generatedAt: untilIso,
+    window: { since: sinceIso, until: untilIso },
+    users: {
+      trackedEntitlements: userRecords.length,
+      activeProUsers: activeProUsers.length,
+      churnedUsers: churnedUsers.length,
+      churnedInWindow: churnedUsers.filter((record) => Boolean(record.churnedAt && record.churnedAt >= sinceIso)).length,
+      reactivatedUsers: userRecords.filter((record) => Boolean(record.reactivatedAt)).length,
+    },
+    captures: {
+      total: captures.length,
+      uniqueUsers: captureUsers.size,
+      bySource: rank(sourceCounts),
+      bySourceType: rank(sourceTypeCounts),
+      byCategory: rank(categoryCounts),
+      daily: Object.entries(dailyCounts).sort(([a], [b]) => a.localeCompare(b)).map(([date, count]) => ({ date, count })),
+    },
+  };
 }

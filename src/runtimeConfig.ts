@@ -13,6 +13,10 @@ export interface RuntimeConfig {
   RTDN_EXPECTED_AUDIENCE?: string;
   // Optional: restrict RTDN OIDC verification to a specific Pub/Sub push service account email.
   RTDN_EXPECTED_SERVICE_ACCOUNT_EMAIL?: string;
+  // Secret required by the private analytics summary endpoint.
+  ANALYTICS_ADMIN_KEY?: string;
+  // Must remain false in deployed environments; enables only local playground test tokens.
+  ALLOW_DEV_AUTH?: string;
 }
 
 declare global {

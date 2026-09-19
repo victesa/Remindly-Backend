@@ -72,3 +72,22 @@ Endpoints:
 - `GET /v1/billing/entitlement` — returns the caller's stored entitlement (used for cross-device sync).
 - `POST /v1/billing/rtdn` — Pub/Sub push endpoint. Looks up the `uid` from the purchase-token mapping, re-verifies with Google Play, and updates the stored entitlement automatically on renewal, cancellation, grace period, hold, or expiry.
 
+## Analytics
+
+Set `ANALYTICS_ADMIN_KEY` as a Worker secret, then query:
+
+```text
+GET /v1/analytics/summary?since=2026-09-01T00:00:00.000Z
+X-Analytics-Key: <ANALYTICS_ADMIN_KEY>
+```
+
+The response includes active Pro users, tracked entitlements, churned and reactivated users, capture totals, unique capture users, common client sources, source types, categories, and daily capture counts. Analytics records contain identifiers and aggregate dimensions only; reminder text and purchase tokens are not copied into analytics collections.
+
+## Production Security
+
+- Normal `/v1/*` API routes require a cryptographically verified Firebase ID token. The token audience and issuer must match `FIREBASE_PROJECT_ID`; client `X-User-Id` and `X-User-Tier` values are not identity or entitlement sources.
+- The development token minting route is disabled in deployed configuration through `ALLOW_DEV_AUTH=false` and should only be enabled in local `.dev.vars`.
+- AI status, logs, quota reset-all, and analytics are protected by `ANALYTICS_ADMIN_KEY`; keep that key only in a private operator environment.
+- RTDN is the only unauthenticated application route and must use Pub/Sub OIDC verification or `RTDN_WEBHOOK_TOKEN`; it fails closed when neither is configured.
+- Keep Firebase service-account JSON, Google Play service-account JSON, API keys, webhook secrets, `.env`, `.dev.vars`, certificates, and Firebase CLI state out of Git. Rotate any credential that has been exposed.
+

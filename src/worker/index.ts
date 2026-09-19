@@ -1,22 +1,23 @@
 import { createHash } from 'crypto';
 import { extractWithGemini } from '../server/geminiExtractor.js';
 import { extractUrls, fetchUrlContent, hasSufficientTextDetail } from '../server/urlFetcher.js';
-import { setRuntimeConfig, type RuntimeConfig } from '../runtimeConfig.js';
-import { ExtractedReminderData, ExtractionResponse, QuotaInfo, SubscriptionEntitlement, UserTier } from '../types.js';
+import { getRuntimeConfig, setRuntimeConfig, type RuntimeConfig } from '../runtimeConfig.js';
+import { ExtractedReminderData, ExtractionResponse, QuotaInfo, StoredReminderItem, SubscriptionEntitlement, UserTier } from '../types.js';
 import {
   IDEMPOTENCY_CACHE_COLLECTION,
   PAYLOAD_DEDUPE_COLLECTION,
-  authenticateHeaders,
   clearLogs,
   consumeQuota,
   deleteUserData,
   deleteUserItem,
   getAiServiceStatus,
+  getAnalyticsSummary,
   getCachedEntry,
   getQuotaInfo,
   getRecentLogs,
   getUserEntitlement,
   getUserIdForPurchaseToken,
+  getUserItemsDelta,
   getUserItems,
   isEntitlementActive,
   logOperation,
@@ -31,6 +32,7 @@ import {
 } from './firestoreRest.js';
 import { decodeRtdnMessage, verifyGooglePlaySubscription } from './googlePlay.js';
 import { verifyPubSubOidcToken } from './pubsubAuth.js';
+import { verifyFirebaseIdToken } from './firebaseAuth.js';
 
 interface AssetsBinding {
   fetch(request: Request): Promise<Response>;
@@ -69,7 +71,7 @@ function corsHeaders(): Headers {
   return new Headers({
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-User-Tier, X-User-Id, X-Client-Date, X-User-Timezone, X-Tunnel-Skip-Anti-Phishing-Page',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-User-Tier, X-User-Id, X-Client-Date, X-User-Timezone, X-Analytics-Key, X-Tunnel-Skip-Anti-Phishing-Page',
   });
 }
 
@@ -379,6 +381,25 @@ function setRateLimitHeaders(headers: Headers, quota: QuotaInfo, tier: UserTier)
   headers.set('X-RateLimit-Tier', tier);
 }
 
+function toSyncItem(item: StoredReminderItem): Record<string, unknown> {
+  return {
+    id: item.id,
+    userId: item.userId,
+    title: item.data.title,
+    summary: item.data.summary,
+    category: item.data.category,
+    deadline: item.data.deadline,
+    eventDate: item.data.eventDate,
+    organization: item.data.organization,
+    source: item.source?.clientSource || null,
+    sourceUrl: item.source?.sourceUrl || item.data.url || null,
+    state: item.state === 'OPEN' ? 'READY' : 'DONE',
+    checklist: item.data.actionableItems || [],
+    createdAt: item.createdAt || item.extractedAt,
+    updatedAt: item.updatedAt || item.extractedAt,
+  };
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv, ctx: WorkerExecutionContext): Promise<Response> {
     setRuntimeConfig(env);
@@ -393,24 +414,36 @@ export default {
 
     try {
       if (pathname === '/v1/health' || pathname === '/api/health') {
-        const aiStatus = await getAiServiceStatus();
         return jsonResponse({
           status: 'ok',
           service: 'Remindly AI Backend Proxy',
           version: '1.2.0',
           timestamp: new Date().toISOString(),
-          geminiConfigured: aiStatus.geminiConfigured,
-          uptimeSeconds: aiStatus.uptimeSeconds,
-          tiersSupported: ['free', 'premium'],
-          strategies: ['gemini_cloud_ai', 'gemini_flash_lite', 'cached_response'],
         });
       }
 
       if (pathname === '/v1/ai-status' && request.method === 'GET') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+        }
         return jsonResponse({ success: true, data: await getAiServiceStatus() });
       }
 
+      if (pathname === '/v1/analytics/summary' && request.method === 'GET') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Analytics access is unauthorized.' }, { status: 401 });
+        }
+        const since = url.searchParams.get('since')?.trim() || undefined;
+        if (since && Number.isNaN(Date.parse(since))) {
+          return jsonResponse({ success: false, error: 'Invalid since timestamp. Use an ISO 8601 timestamp.' }, { status: 400 });
+        }
+        return jsonResponse({ success: true, data: await getAnalyticsSummary(since) });
+      }
+
       if (pathname === '/v1/auth/mint-token' && request.method === 'POST') {
+        if (getRuntimeConfig().ALLOW_DEV_AUTH !== 'true') {
+          return jsonResponse({ success: false, error: 'Not found.' }, { status: 404 });
+        }
         const body = await request.json().catch(() => ({})) as Record<string, unknown>;
         const tier: UserTier = body.tier === 'premium' ? 'premium' : 'free';
         const userId = typeof body.userId === 'string' ? body.userId : undefined;
@@ -433,11 +466,13 @@ export default {
           } catch (error) {
             return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Pub/Sub token verification failed.' }, { status: 401 });
           }
-        } else {
+        } else if (env.RTDN_WEBHOOK_TOKEN) {
           const providedToken = url.searchParams.get('token') || request.headers.get('x-rtdn-token');
-          if (env.RTDN_WEBHOOK_TOKEN && providedToken !== env.RTDN_WEBHOOK_TOKEN) {
+          if (providedToken !== env.RTDN_WEBHOOK_TOKEN) {
             return jsonResponse({ success: false, error: 'Unauthorized RTDN webhook call.' }, { status: 401 });
           }
+        } else {
+          return jsonResponse({ success: false, error: 'RTDN authentication is not configured.' }, { status: 503 });
         }
 
         const pushBody = await request.json().catch(() => null) as { message?: { data?: string } } | null;
@@ -494,17 +529,21 @@ export default {
         }
       }
 
-      const auth = authenticateHeaders(request.headers, url);
-      let user = auth.user;
-
-      if (!auth.isDevToken) {
-        try {
-          const entitlement = await getUserEntitlement(user.uid);
-          user = { ...user, tier: isEntitlementActive(entitlement) ? 'premium' : 'free' };
-        } catch {
-          // Firestore/service account unavailable; fall back to the header-derived tier.
-        }
+      let user;
+      try {
+        user = await verifyFirebaseIdToken(request.headers.get('authorization'));
+      } catch (error) {
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Authentication failed.' }, { status: 401 });
       }
+
+      try {
+        const entitlement = await getUserEntitlement(user.uid);
+        user = { ...user, tier: isEntitlementActive(entitlement) ? 'premium' : 'free' as UserTier };
+      } catch {
+        return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
+      }
+
+      const auth = { bearerProvided: true };
 
       if (pathname === '/v1/quota' && request.method === 'GET') {
         const quota = await getQuotaInfo(user.uid, user.tier);
@@ -513,14 +552,16 @@ export default {
 
       if (pathname === '/v1/quota/reset' && request.method === 'POST') {
         const body = await request.json().catch(() => ({})) as Record<string, unknown>;
-        const userId = typeof body.userId === 'string' ? body.userId : user.uid;
         const resetAll = body.all === true;
         if (resetAll) {
+          if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+            return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+          }
           await resetAllQuotas();
-        } else if (userId) {
-          await resetUserQuota(userId);
+        } else {
+          await resetUserQuota(user.uid);
         }
-        return jsonResponse({ success: true, message: resetAll ? 'All quotas reset' : `Quota reset for user ${userId}` });
+        return jsonResponse({ success: true, message: resetAll ? 'All quotas reset' : `Quota reset for user ${user.uid}` });
       }
 
       if (pathname === '/v1/billing/verify-purchase' && request.method === 'POST') {
@@ -562,6 +603,9 @@ export default {
       }
 
       if (pathname === '/v1/logs' && request.method === 'GET') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+        }
         const limit = Number.parseInt(url.searchParams.get('limit') || '100', 10) || 100;
         const tier = (url.searchParams.get('tier') || undefined) as UserTier | undefined;
         const endpoint = url.searchParams.get('endpoint') || undefined;
@@ -570,6 +614,9 @@ export default {
       }
 
       if (pathname === '/v1/logs/clear' && request.method === 'POST') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+        }
         await clearLogs();
         return jsonResponse({ success: true, message: 'Logs cleared' });
       }
@@ -583,12 +630,35 @@ export default {
         return jsonResponse({ success: true, userId: user.uid, userTier: user.tier, count: items.length, items });
       }
 
+      if (pathname === '/v1/items/sync' && request.method === 'GET') {
+        if (!auth.bearerProvided) {
+          return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
+        }
+        if (user.tier !== 'premium') {
+          return jsonResponse({ success: false, error: 'Stored captures are available for premium users only.', userId: user.uid, userTier: user.tier }, { status: 403 });
+        }
+
+        const sinceParam = url.searchParams.get('since')?.trim() || undefined;
+        if (sinceParam && Number.isNaN(Date.parse(sinceParam))) {
+          return jsonResponse({ success: false, error: 'Invalid since timestamp. Use an ISO 8601 timestamp.' }, { status: 400 });
+        }
+
+        const syncTimestamp = new Date().toISOString();
+        const delta = await getUserItemsDelta(user.uid, sinceParam);
+        return jsonResponse({
+          success: true,
+          syncTimestamp,
+          updatedItems: delta.updatedItems.map(toSyncItem),
+          deletedItemIds: delta.deletedItemIds,
+        });
+      }
+
       const itemMatch = pathname.match(/^\/v1\/items\/([^/]+)$/);
       if (itemMatch && request.method === 'PATCH') {
         if (!auth.bearerProvided) {
           return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
         }
-        if ((request.headers.get('x-user-tier') || '').toLowerCase() !== 'premium' || user.tier !== 'premium') {
+        if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Premium access required for item updates.', userId: user.uid, userTier: user.tier }, { status: 403 });
         }
         const updated = await updateUserItem(user.uid, decodeURIComponent(itemMatch[1]), await request.json().catch(() => ({})) as Record<string, unknown>);
@@ -599,7 +669,7 @@ export default {
         if (!auth.bearerProvided) {
           return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
         }
-        if ((request.headers.get('x-user-tier') || '').toLowerCase() !== 'premium' || user.tier !== 'premium') {
+        if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Premium access required for item deletion.', userId: user.uid, userTier: user.tier }, { status: 403 });
         }
         const deleted = await deleteUserItem(user.uid, decodeURIComponent(itemMatch[1]));
