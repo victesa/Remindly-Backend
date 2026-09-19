@@ -482,6 +482,7 @@ export default {
           return jsonResponse({ success: true, ignored: true });
         }
 
+        let rtdnStage = 'decode';
         try {
           const notification = decodeRtdnMessage(rawData);
           const subNotification = notification.subscriptionNotification;
@@ -489,6 +490,7 @@ export default {
             return jsonResponse({ success: true, ignored: true });
           }
 
+          rtdnStage = 'purchase-token-mapping';
           const mappedUserId = await getUserIdForPurchaseToken(subNotification.purchaseToken);
           if (!mappedUserId) {
             ctx.waitUntil(logOperation({
@@ -508,6 +510,7 @@ export default {
             return jsonResponse({ success: true, ignored: true });
           }
 
+          rtdnStage = 'google-play-verification';
           const verification = await verifyGooglePlaySubscription(subNotification.purchaseToken, subNotification.subscriptionId);
           const entitlement: SubscriptionEntitlement = {
             userId: mappedUserId,
@@ -522,10 +525,18 @@ export default {
             source: 'google_play',
             updatedAt: new Date().toISOString(),
           };
+          rtdnStage = 'entitlement-storage';
           await saveUserEntitlement(entitlement);
           return jsonResponse({ success: true });
         } catch (error) {
-          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'RTDN processing failed.' }, { status: 500 });
+          const errorMessage = error instanceof Error ? error.message : 'RTDN processing failed.';
+          console.error(JSON.stringify({
+            event: 'rtdn_processing_failed',
+            stage: rtdnStage,
+            error: errorMessage,
+            requestId,
+          }));
+          return jsonResponse({ success: false, error: errorMessage, stage: rtdnStage, requestId }, { status: 500 });
         }
       }
 

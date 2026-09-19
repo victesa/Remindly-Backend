@@ -55,6 +55,8 @@ Notes:
 - Use `.dev.vars` for local Worker-only secrets. It is gitignored.
 - `.env` files remain local-only and are gitignored.
 
+Extraction quotas are tracked per authenticated Firebase user in Firestore under `rateLimits/{uid}`. The free tier allows 5 extractions per UTC calendar month, and the premium tier allows 250. The quota is shared across the user's devices and resets at the start of the next UTC month.
+
 ## Google Play Subscription Verification
 
 The Worker verifies Google Play subscriptions server-to-server and stores the resulting entitlement in Firestore under `users/{uid}/billing/current`. Client-supplied `X-User-Tier` headers are ignored for real (non-playground) tokens; the stored entitlement is the source of truth.

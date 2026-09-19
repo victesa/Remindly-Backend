@@ -43,6 +43,7 @@ interface CachedEntry {
 interface RateLimitRecord {
   timestamps: number[];
   customLimit?: number;
+  periodKey?: string;
 }
 
 interface AnalyticsUserRecord {
@@ -97,9 +98,9 @@ const ANALYTICS_CAPTURES_COLLECTION = 'analyticsCaptures';
 const MAX_LOGS = 1000;
 const startTime = Date.now();
 
-const TIER_LIMITS: Record<UserTier, { limit: number; windowMs: number }> = {
-  free: { limit: 25, windowMs: 15 * 60 * 1000 },
-  premium: { limit: 250, windowMs: 15 * 60 * 1000 },
+const TIER_LIMITS: Record<UserTier, { limit: number }> = {
+  free: { limit: 5 },
+  premium: { limit: 250 },
 };
 
 const CATEGORY_ALIAS_MAP: Record<string, ExtractedReminderData['category']> = {
@@ -508,26 +509,36 @@ async function saveRateLimitRecord(userId: string, record: RateLimitRecord): Pro
   await setDocument(documentPath(RATE_LIMITS_COLLECTION, userId), record as unknown as Record<string, unknown>);
 }
 
+function utcPeriodKey(date = new Date()): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function nextUtcMonthStart(date = new Date()): number {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
+}
+
 export async function getQuotaInfo(userId: string, tier: UserTier): Promise<QuotaInfo> {
   const now = Date.now();
   const config = TIER_LIMITS[tier] || TIER_LIMITS.free;
-  const windowStart = now - config.windowMs;
   const record = await getOrCreateRateLimitRecord(userId);
-  record.timestamps = record.timestamps.filter((timestamp) => timestamp > windowStart);
+  const periodKey = utcPeriodKey();
+  if (record.periodKey !== periodKey) {
+    record.timestamps = [];
+    record.periodKey = periodKey;
+  }
   await saveRateLimitRecord(userId, record);
 
   const limit = record.customLimit ?? config.limit;
   const count = record.timestamps.length;
   const remaining = Math.max(0, limit - count);
-  const oldest = record.timestamps[0];
-  const resetInMs = oldest ? Math.max(0, oldest + config.windowMs - now) : config.windowMs;
+  const resetInMs = Math.max(0, nextUtcMonthStart() - now);
 
   return {
     limit,
     remaining,
     resetInSeconds: Math.ceil(resetInMs / 1000),
     tier,
-    windowSizeSeconds: Math.floor(config.windowMs / 1000),
+    windowSizeSeconds: Math.ceil((nextUtcMonthStart() - Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)) / 1000),
   };
 }
 

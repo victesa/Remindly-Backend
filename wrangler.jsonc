@@ -6,7 +6,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "APP_URL": "MY_APP_URL",
-    "DAILY_RATE_LIMIT": "30",
     "FIREBASE_PROJECT_ID": "remindly-9678a",
     "GOOGLE_PLAY_PACKAGE_NAME": "com.victorkirui.remindly",
     "ALLOW_DEV_AUTH": "false"
