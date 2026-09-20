@@ -580,8 +580,11 @@ export default {
       }
 
       if (pathname === '/v1/quota' && request.method === 'GET') {
-        const quota = await getQuotaInfo(user.uid, user.tier);
-        return jsonResponse({ success: true, quota, user });
+        return jsonResponse({
+          success: false,
+          error: 'This endpoint is deprecated. Use GET /v1/me instead.',
+          deprecated: true,
+        }, { status: 410 });
       }
 
       if (pathname === '/v1/quota/reset' && request.method === 'POST') {
@@ -633,8 +636,11 @@ export default {
       }
 
       if (pathname === '/v1/billing/entitlement' && request.method === 'GET') {
-        const entitlement = await getUserEntitlement(user.uid).catch(() => null);
-        return jsonResponse({ success: true, userId: user.uid, tier: user.tier, entitlement });
+        return jsonResponse({
+          success: false,
+          error: 'This endpoint is deprecated. Use GET /v1/me instead.',
+          deprecated: true,
+        }, { status: 410 });
       }
 
       if (pathname === '/v1/logs' && request.method === 'GET') {
