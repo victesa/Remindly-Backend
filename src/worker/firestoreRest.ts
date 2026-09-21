@@ -61,7 +61,7 @@ interface AnalyticsUserRecord {
 
 type EditableItemState = 'OPEN' | 'DONE';
 
-type SourceType = 'text' | 'image' | 'url' | 'multimodal';
+export type SourceType = 'text' | 'image' | 'url' | 'multimodal';
 
 export interface SaveItemContext {
   clientSource?: string | null;
@@ -96,6 +96,7 @@ const PURCHASE_TOKEN_MAP_COLLECTION = 'purchaseTokenMap';
 const BILLING_SUBSCRIPTION_DOC = 'current';
 const ANALYTICS_USERS_COLLECTION = 'analyticsUsers';
 const ANALYTICS_CAPTURES_COLLECTION = 'analyticsCaptures';
+const EXTRACTION_ANOMALIES_COLLECTION = 'extractionAnomalies';
 const MAX_LOGS = 1000;
 const startTime = Date.now();
 
@@ -1154,6 +1155,38 @@ export function isEntitlementActive(entitlement: SubscriptionEntitlement | null)
     return false;
   }
   return true;
+}
+
+export interface ExtractionAnomalyEntry {
+  requestId: string;
+  userId: string;
+  userTier: UserTier;
+  reasons: string[];
+  sourceType: SourceType;
+  hasText: boolean;
+  hasImage: boolean;
+  hasUrl: boolean;
+  category: string;
+  confidenceScore: number | null;
+  deadline: string | null;
+  eventDate: string | null;
+  referenceTimestamp: string | null;
+}
+
+/** Fire-and-forget log of suspected AI hallucinations (e.g. echoing the reference time as a date) for later review. */
+export async function logExtractionAnomaly(entry: ExtractionAnomalyEntry): Promise<void> {
+  const id = `anomaly_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  await setDocument(documentPath(EXTRACTION_ANOMALIES_COLLECTION, id), {
+    ...entry,
+    id,
+    timestamp: new Date().toISOString(),
+  } as unknown as Record<string, unknown>);
+}
+
+export async function getExtractionAnomalies(limit = 100): Promise<ExtractionAnomalyEntry[]> {
+  const safeLimit = Math.max(1, Math.min(limit, 500));
+  const docs = await listDocuments<ExtractionAnomalyEntry & { timestamp?: string }>(EXTRACTION_ANOMALIES_COLLECTION, { pageSize: safeLimit, orderBy: 'timestamp desc' }).catch(() => []);
+  return docs.slice(0, safeLimit);
 }
 
 export async function getAnalyticsSummary(since?: string): Promise<Record<string, unknown>> {

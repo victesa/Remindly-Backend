@@ -13,6 +13,7 @@ import {
   getAiServiceStatus,
   getAnalyticsSummary,
   getCachedEntry,
+  getExtractionAnomalies,
   getQuotaInfo,
   getRecentLogs,
   getUserEntitlement,
@@ -20,6 +21,7 @@ import {
   getUserItemsDelta,
   getUserItems,
   isEntitlementActive,
+  logExtractionAnomaly,
   logOperation,
   mapPurchaseTokenToUser,
   requestPasswordReset,
@@ -383,6 +385,40 @@ function setRateLimitHeaders(headers: Headers, quota: QuotaInfo, tier: UserTier)
   headers.set('X-RateLimit-Tier', tier);
 }
 
+const REFERENCE_TIME_ECHO_TOLERANCE_MS = 2 * 60 * 1000;
+
+/** Flags suspected AI hallucinations, e.g. echoing the reference "now" timestamp as an extracted date. */
+function detectExtractionAnomalies(
+  data: ExtractedReminderData,
+  referenceTimestamp: string | null,
+  hasImage: boolean,
+  hasUrl: boolean,
+): string[] {
+  const reasons: string[] = [];
+  const referenceMs = referenceTimestamp ? new Date(referenceTimestamp).getTime() : NaN;
+
+  if (!Number.isNaN(referenceMs)) {
+    if (data.deadline) {
+      const deadlineMs = new Date(data.deadline).getTime();
+      if (!Number.isNaN(deadlineMs) && Math.abs(deadlineMs - referenceMs) <= REFERENCE_TIME_ECHO_TOLERANCE_MS) {
+        reasons.push('deadline_matches_reference_time');
+      }
+    }
+    if (data.eventDate) {
+      const eventMs = new Date(data.eventDate).getTime();
+      if (!Number.isNaN(eventMs) && Math.abs(eventMs - referenceMs) <= REFERENCE_TIME_ECHO_TOLERANCE_MS) {
+        reasons.push('event_date_matches_reference_time');
+      }
+    }
+  }
+
+  if ((hasImage || hasUrl) && typeof data.confidenceScore === 'number' && data.confidenceScore < 0.55) {
+    reasons.push('low_confidence_visual_extraction');
+  }
+
+  return reasons;
+}
+
 function toSyncItem(item: StoredReminderItem): Record<string, unknown> {
   return {
     id: item.id,
@@ -440,6 +476,15 @@ export default {
           return jsonResponse({ success: false, error: 'Invalid since timestamp. Use an ISO 8601 timestamp.' }, { status: 400 });
         }
         return jsonResponse({ success: true, data: await getAnalyticsSummary(since) });
+      }
+
+      if (pathname === '/v1/diagnostics/extraction-anomalies' && request.method === 'GET') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+        }
+        const limit = Number.parseInt(url.searchParams.get('limit') || '100', 10) || 100;
+        const anomalies = await getExtractionAnomalies(limit);
+        return jsonResponse({ success: true, count: anomalies.length, anomalies });
       }
 
       if (pathname === '/v1/auth/mint-token' && request.method === 'POST') {
@@ -801,6 +846,26 @@ export default {
             categoryExtracted: result.data.category,
             titleExtracted: result.data.title,
           }));
+
+          const referenceTimestamp = parsed.currentDate || null;
+          const anomalyReasons = detectExtractionAnomalies(result.data, referenceTimestamp, hasImage, hasUrl);
+          if (anomalyReasons.length > 0) {
+            ctx.waitUntil(logExtractionAnomaly({
+              requestId: result.metadata.requestId,
+              userId: user.uid,
+              userTier: user.tier,
+              reasons: anomalyReasons,
+              sourceType: hasImage && hasText ? 'multimodal' : hasImage ? 'image' : hasUrl ? 'url' : 'text',
+              hasText,
+              hasImage,
+              hasUrl,
+              category: result.data.category,
+              confidenceScore: result.data.confidenceScore ?? null,
+              deadline: result.data.deadline,
+              eventDate: result.data.eventDate,
+              referenceTimestamp,
+            }).catch(() => undefined));
+          }
 
           return withCors(new Response(JSON.stringify(result), { status: 200, headers: rateHeaders }));
         } catch (error) {
