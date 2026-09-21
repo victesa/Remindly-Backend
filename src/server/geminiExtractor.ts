@@ -292,7 +292,7 @@ CORE COGNITIVE EXTRACTION RULES:
     type: Type.OBJECT,
     properties: {
       title: { type: Type.STRING, description: 'Concise reminder title' },
-      summary: { type: Type.STRING, description: 'Executive summary or null' },
+      summary: { type: Type.STRING, nullable: true, description: 'Executive summary or null' },
       category: {
         type: Type.STRING,
         enum: [
@@ -317,20 +317,24 @@ CORE COGNITIVE EXTRACTION RULES:
       },
       deadline: {
         type: Type.STRING,
-        description: 'UTC ISO 8601 string (YYYY-MM-DDTHH:MM:SS.sssZ) for submission/payment due date calculated using the user timezone, or null if not a deadline.',
+        nullable: true,
+        description: 'UTC ISO 8601 string (YYYY-MM-DDTHH:MM:SS.sssZ) for submission/payment due date calculated using the user timezone. Must be JSON null (not a string) if the input does not explicitly state a deadline.',
       },
       eventDate: {
         type: Type.STRING,
-        description: 'UTC ISO 8601 string (YYYY-MM-DDTHH:MM:SS.sssZ) for scheduled start time of event/appointment calculated using the user timezone, or null if no event time.',
+        nullable: true,
+        description: 'UTC ISO 8601 string (YYYY-MM-DDTHH:MM:SS.sssZ) for scheduled start time of event/appointment calculated using the user timezone. Must be JSON null (not a string) if the input does not explicitly state an event time.',
       },
       organization: {
         type: Type.STRING,
-        description: 'Name of company, hospital, doctor, school, or host, or null.',
+        nullable: true,
+        description: 'Name of company, hospital, doctor, school, or host. Must be JSON null if not mentioned.',
       },
       actionableItems: {
         type: Type.ARRAY,
+        nullable: true,
         items: { type: Type.STRING },
-        description: '1 to 3 actionable next steps or null',
+        description: '1 to 3 actionable next steps. Must be JSON null if none are needed.',
       },
       confidenceScore: {
         type: Type.NUMBER,
