@@ -65,7 +65,7 @@ interface CachedEntry {
 
 const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
 const PAYLOAD_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
-const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg']);
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg', 'application/pdf']);
 const inFlightRequests = new Map<string, Promise<ExtractedReminderData>>();
 
 function corsHeaders(): Headers {
@@ -145,7 +145,7 @@ async function parseExtractionRequest(request: Request, userTier: UserTier): Pro
 
     if (fileEntry instanceof File) {
       if (!ALLOWED_MIME_TYPES.has(fileEntry.type)) {
-        throw new Error(`Unsupported file type: ${fileEntry.type}. Allowed: JPEG, PNG, WEBP, GIF`);
+        throw new Error(`Unsupported file type: ${fileEntry.type}. Allowed: JPEG, PNG, WEBP, GIF, PDF`);
       }
       if (fileEntry.size > maxUploadBytes) {
         throw new Error(`Upload error: File too large. Max ${userTier === 'premium' ? '25MB' : '10MB'} allowed.`);

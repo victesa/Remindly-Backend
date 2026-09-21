@@ -238,6 +238,10 @@ CORE COGNITIVE EXTRACTION RULES:
    - NEVER make up or extrapolate dates or years (do NOT guess distant years like 2027, 2028 unless explicitly written in the user input).
    - Phone numbers, invoice numbers, account codes, or reference IDs are NOT dates.
    - If the text has no dates at all, BOTH 'deadline' and 'eventDate' MUST be null.
+   - The 'User Local Time Right Now' and 'Client Reference Instant (UTC)' values above are ONLY a reference anchor for resolving relative expressions (e.g. "tomorrow", "in 2 hours"). NEVER copy either value into 'deadline' or 'eventDate' unless the input explicitly says "today"/"now"/"right now" is itself the deadline or event time.
+   - If the provided image or document is unreadable, blank, corrupted, or contains no discernible reminder content, return 'deadline': null and 'eventDate': null and set confidenceScore below 0.5 rather than guessing or defaulting to the reference time.
+   - If the input is a multi-page PDF document, review ALL pages (not just the first) for the title, dates, deadlines, and instructions before answering.
+   - When BOTH an attached image/document AND "Supplementary Extracted Text" are provided, they originate from the SAME source. The attached image/document is the ground truth; the supplementary text is a possibly-imperfect OCR/text-extraction of it, provided only to help you read faint or small text. If they conflict (e.g. different dates), trust what you directly observe in the attached image/document over the supplementary text.
 
 2. TEMPORAL DISAMBIGUATION (EVENT vs DEADLINE):
    - 'eventDate': The specific scheduled start time when an event, meeting, appointment, sync, flight, concert, webinar, interview, or dinner begins.
@@ -271,7 +275,9 @@ CORE COGNITIVE EXTRACTION RULES:
   // Construct text prompt with explicit timezone anchor
   let promptText = `User Local Reference Time: ${userLocalFormatted} (Timezone: ${timezone})\nClient Reference UTC: ${clientUtcIso}\n\nExtract structured reminder details from this capture:\n\n`;
   if (input.text) {
-    promptText += `User Content/Notes:\n"""\n${input.text}\n"""\n\n`;
+    promptText += input.image
+      ? `Supplementary Extracted Text (auto-generated OCR/text-extraction from the SAME attached image/document above; may be incomplete, garbled, or out of order):\n"""\n${input.text}\n"""\n\n`
+      : `User Content/Notes:\n"""\n${input.text}\n"""\n\n`;
   }
   if (input.urlContent) {
     promptText += `URL Context (${input.urlContent.url}):\n`;
