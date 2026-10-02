@@ -101,7 +101,7 @@ const MAX_LOGS = 1000;
 const startTime = Date.now();
 
 const TIER_LIMITS: Record<UserTier, { limit: number; imageLimit: number }> = {
-  free: { limit: 5, imageLimit: 5 },
+  free: { limit: 10, imageLimit: 10 },
   premium: { limit: 250, imageLimit: 250 },
 };
 const QUOTA_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
