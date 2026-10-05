@@ -666,7 +666,7 @@ export async function saveExtractedItem(
 }
 
 export async function getUserItems(userId: string, limit = 50): Promise<StoredReminderItem[]> {
-  const captures = await listDocuments(documentPath('users', userId, 'captures'), { pageSize: limit * 4, orderBy: 'extractedAt desc' }).catch(() => []);
+  const captures = await listDocuments(documentPath('users', userId, 'captures'), { pageSize: 1000 });
 
   const deduped = new Map<string, StoredReminderItem>();
   for (const doc of captures) {
@@ -687,7 +687,7 @@ export async function getUserItemsDelta(userId: string, since?: string): Promise
   const parentPath = documentPath('users', userId);
   const captures = since
     ? await queryDocumentsSince(parentPath, 'captures', 'updatedAt', since)
-    : await listDocuments(documentPath('users', userId, 'captures'), { pageSize: 1000, orderBy: 'updatedAt desc' });
+    : await listDocuments(documentPath('users', userId, 'captures'), { pageSize: 1000 });
 
   const deduped = new Map<string, StoredReminderItem>();
   for (const doc of captures) {
