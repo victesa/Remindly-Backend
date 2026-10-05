@@ -438,8 +438,79 @@ function toSyncItem(item: StoredReminderItem): Record<string, unknown> {
   };
 }
 
+function sanitizeLogError(message: string, env: WorkerEnv): string {
+  let sanitized = message;
+  for (const [name, value] of Object.entries(env)) {
+    if (typeof value === 'string' && value && /KEY|TOKEN|SECRET|SERVICE_ACCOUNT_JSON/.test(name)) {
+      sanitized = sanitized.split(value).join('[REDACTED]');
+    }
+  }
+  return sanitized
+    .replace(/-----BEGIN [\s\S]*?-----END [^-]+-----/g, '[REDACTED KEY]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/https?:\/\/[^\s"<>]+/gi, '[REDACTED URL]')
+    .replace(/(?:"?(?:purchaseToken|private_key|apiKey|token|secret)"?\s*[:=]\s*)[^,\n}]+/gi, '[REDACTED CREDENTIAL]')
+    .slice(0, 500);
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv, ctx: WorkerExecutionContext): Promise<Response> {
+    const startedAt = Date.now();
+    const requestId = createRequestId();
+    const endpoint = new URL(request.url).pathname;
+    const context: WorkerExecutionContext = {
+      waitUntil(promise) {
+        ctx.waitUntil(promise.catch((error: unknown) => {
+          console.error(JSON.stringify({
+            event: 'endpoint_background_failed',
+            requestId,
+            endpoint,
+            method: request.method,
+            error: sanitizeLogError(error instanceof Error ? error.message : 'Background operation failed.', env),
+          }));
+        }));
+      },
+    };
+    let response: Response;
+    try {
+      response = await endpointHandler.fetch(request, env, context, requestId);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'endpoint_exception', requestId, endpoint, method: request.method,
+        error: sanitizeLogError(error instanceof Error ? error.message : 'Unhandled error.', env),
+      }));
+      response = jsonResponse({ success: false, error: 'Internal server error.', requestId }, { status: 500 });
+    }
+
+    const entry: Record<string, unknown> = {
+      event: response.status >= 400 ? 'endpoint_failed' : 'endpoint_completed',
+      requestId,
+      endpoint,
+      method: request.method,
+      statusCode: response.status,
+      latencyMs: Date.now() - startedAt,
+    };
+    if (response.status >= 400) {
+      let reason = response.statusText || `HTTP ${response.status}`;
+      if (response.headers.get('content-type')?.includes('application/json')) {
+        const payload = await response.clone().json().catch(() => null) as { error?: unknown; stage?: unknown } | null;
+        if (typeof payload?.error === 'string') reason = payload.error;
+        if (typeof payload?.stage === 'string' && /^[a-z-]{1,80}$/.test(payload.stage)) entry.stage = payload.stage;
+      }
+      entry.error = sanitizeLogError(reason, env);
+      console.error(JSON.stringify(entry));
+    } else {
+      console.log(JSON.stringify(entry));
+    }
+    const headers = new Headers(response.headers);
+    headers.set('X-Request-Id', requestId);
+    headers.set('Access-Control-Expose-Headers', 'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, X-RateLimit-Tier, Retry-After');
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  },
+};
+
+const endpointHandler = {
+  async fetch(request: Request, env: WorkerEnv, ctx: WorkerExecutionContext, requestId: string): Promise<Response> {
     setRuntimeConfig(env);
 
     if (request.method === 'OPTIONS') {
@@ -448,7 +519,6 @@ export default {
 
     const url = new URL(request.url);
     const pathname = url.pathname;
-    const requestId = createRequestId();
 
     try {
       if (pathname === '/v1/health' || pathname === '/api/health') {
@@ -581,7 +651,7 @@ export default {
           console.error(JSON.stringify({
             event: 'rtdn_processing_failed',
             stage: rtdnStage,
-            error: errorMessage,
+            error: sanitizeLogError(errorMessage, env),
             requestId,
           }));
           return jsonResponse({ success: false, error: errorMessage, stage: rtdnStage, requestId }, { status: 500 });
@@ -747,8 +817,15 @@ export default {
         if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Premium access required for item updates.', userId: user.uid, userTier: user.tier }, { status: 403 });
         }
-        const updated = await updateUserItem(user.uid, decodeURIComponent(itemMatch[1]), await request.json().catch(() => ({})) as Record<string, unknown>);
-        return jsonResponse(updated);
+        try {
+          const updated = await updateUserItem(user.uid, decodeURIComponent(itemMatch[1]), await request.json().catch(() => ({})) as Record<string, unknown>);
+          return jsonResponse(updated);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Item update failed.';
+          const status = message === 'Item not found.' ? 404
+            : message.startsWith('Invalid ') || message === 'No valid fields provided for update.' ? 400 : 500;
+          return jsonResponse({ success: false, error: message, requestId }, { status });
+        }
       }
 
       if (itemMatch && request.method === 'DELETE') {

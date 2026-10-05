@@ -10,7 +10,9 @@ Authorization: Bearer <firebase-id-token>
 
 The token is cryptographically verified against Firebase's public keys. `X-User-Id` and `X-User-Tier` headers are **not trusted** — the server resolves the account's tier itself from the Firestore entitlement record (`users/{uid}/billing/current`), never from client-supplied headers.
 
-Every JSON response includes a `success: boolean` field. On failure, an `error: string` field is included.
+Most JSON responses include a `success: boolean` field. Health responses and successful PATCH responses use the endpoint-specific shapes below. On failure, an `error: string` field is included.
+
+All responses include `X-Request-Id`. Use it to find the matching structured `endpoint_failed` or `endpoint_completed` log in Cloudflare. Failed endpoint logs include method, path (without query parameters), status, duration, and a sanitized error reason. Request bodies and credentials are not included in these endpoint logs.
 
 ---
 
@@ -310,7 +312,11 @@ Returns the updated item object directly (same shape as one entry in `GET /v1/it
 
 **Errors**
 - `403` — account is not premium.
-- `500` — item not found, or an invalid field value was supplied (e.g. invalid `category`, invalid `state`). The response body is `{ "success": false, "error": "..." }`; note that a missing item currently surfaces as `500`, not `404`.
+- `404` — item not found in the authenticated user's server captures. Use the server item ID, not an unrelated client-only local ID.
+- `400` — invalid field value (e.g. invalid `category` or `state`).
+- `500` — unexpected storage or server failure.
+
+PATCH errors return `{ "success": false, "error": "...", "requestId": "req_..." }`.
 
 ---
 
