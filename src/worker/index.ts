@@ -659,6 +659,7 @@ const endpointHandler = {
       }
 
       let user;
+      let currentEntitlement: SubscriptionEntitlement | null = null;
       try {
         user = await verifyFirebaseIdToken(request.headers.get('authorization'));
       } catch (error) {
@@ -666,8 +667,8 @@ const endpointHandler = {
       }
 
       try {
-        const entitlement = await getUserEntitlement(user.uid);
-        user = { ...user, tier: isEntitlementActive(entitlement) ? 'premium' : 'free' as UserTier };
+        currentEntitlement = await getUserEntitlement(user.uid);
+        user = { ...user, tier: isEntitlementActive(currentEntitlement) ? 'premium' : 'free' as UserTier };
       } catch {
         return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
       }
@@ -675,8 +676,7 @@ const endpointHandler = {
       const auth = { bearerProvided: true };
 
       if ((pathname === '/v1/me' || pathname === '/v1/user/profile') && request.method === 'GET') {
-        const quota = await getQuotaInfo(user.uid, user.tier);
-        const entitlement = await getUserEntitlement(user.uid).catch(() => null);
+        const quota = await getQuotaInfo(user.uid, user.tier, currentEntitlement);
         return jsonResponse({
           success: true,
           user: {
@@ -686,9 +686,9 @@ const endpointHandler = {
           },
           subscription: {
             tier: user.tier,
-            status: entitlement?.status || 'none',
-            productId: entitlement?.productId || null,
-            expiryTimeMillis: entitlement?.expiryTimeMillis || null,
+            status: currentEntitlement?.status || 'none',
+            productId: currentEntitlement?.productId || null,
+            expiryTimeMillis: currentEntitlement?.expiryTimeMillis || null,
           },
           quota,
         });
@@ -870,7 +870,7 @@ const endpointHandler = {
         }
         let quotaResult: Awaited<ReturnType<typeof consumeQuota>>;
         try {
-          quotaResult = await consumeQuota(user.uid, user.tier, Boolean(parsed.image));
+          quotaResult = await consumeQuota(user.uid, user.tier, Boolean(parsed.image), currentEntitlement);
         } catch (error) {
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Quota service unavailable.' }, { status: 503 });
         }

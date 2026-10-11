@@ -45,6 +45,7 @@ interface RateLimitRecord {
   timestamps: number[];
   imageTimestamps?: number[];
   customLimit?: number;
+  periodKey?: string;
 }
 
 interface AnalyticsUserRecord {
@@ -501,6 +502,7 @@ async function getOrCreateRateLimitRecord(userId: string): Promise<RateLimitReco
       timestamps: Array.isArray(existing.timestamps) ? existing.timestamps : [],
       imageTimestamps: Array.isArray(existing.imageTimestamps) ? existing.imageTimestamps : [],
       customLimit: existing.customLimit,
+      periodKey: existing.periodKey,
     };
   }
 
@@ -513,21 +515,35 @@ async function saveRateLimitRecord(userId: string, record: RateLimitRecord): Pro
   await setDocument(documentPath(RATE_LIMITS_COLLECTION, userId), record as unknown as Record<string, unknown>);
 }
 
-export async function getQuotaInfo(userId: string, tier: UserTier): Promise<QuotaInfo> {
-  const now = Date.now();
+export async function getQuotaInfo(
+  userId: string,
+  tier: UserTier,
+  entitlement: SubscriptionEntitlement | null = null,
+): Promise<QuotaInfo> {
+  const nowDate = new Date();
+  const now = nowDate.getTime();
   const config = TIER_LIMITS[tier] || TIER_LIMITS.free;
   const record = await getOrCreateRateLimitRecord(userId);
-  const windowStart = now - QUOTA_WINDOW_MS;
-  record.timestamps = record.timestamps.filter((timestamp) => timestamp > windowStart);
-  record.imageTimestamps = (record.imageTimestamps || []).filter((timestamp) => timestamp > windowStart);
+  const nextUtcMonth = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() + 1, 1);
+  const proPeriodKey = entitlement?.expiryTimeMillis ? `premium:${entitlement.expiryTimeMillis}` : 'premium:unknown';
+  const periodKey = tier === 'premium'
+    ? proPeriodKey
+    : `free:${nowDate.getUTCFullYear()}-${String(nowDate.getUTCMonth() + 1).padStart(2, '0')}`;
+  if (record.periodKey !== periodKey) {
+    record.timestamps = [];
+    record.imageTimestamps = [];
+    record.periodKey = periodKey;
+  }
   await saveRateLimitRecord(userId, record);
 
   const limit = record.customLimit ?? config.limit;
   const count = record.timestamps.length;
   const remaining = Math.max(0, limit - count);
-  const oldest = record.timestamps[0];
-  const resetInMs = oldest ? Math.max(0, oldest + QUOTA_WINDOW_MS - now) : QUOTA_WINDOW_MS;
-  const imageCount = record.imageTimestamps.length;
+  const periodEnd = tier === 'premium' && entitlement?.expiryTimeMillis
+    ? entitlement.expiryTimeMillis
+    : nextUtcMonth;
+  const resetInMs = Math.max(0, periodEnd - now);
+  const imageCount = (record.imageTimestamps || []).length;
 
   return {
     limit,
@@ -536,12 +552,19 @@ export async function getQuotaInfo(userId: string, tier: UserTier): Promise<Quot
     imageRemaining: Math.max(0, config.imageLimit - imageCount),
     resetInSeconds: Math.ceil(resetInMs / 1000),
     tier,
-    windowSizeSeconds: Math.floor(QUOTA_WINDOW_MS / 1000),
+    windowSizeSeconds: tier === 'premium'
+      ? Math.floor(QUOTA_WINDOW_MS / 1000)
+      : Math.floor((nextUtcMonth - Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), 1)) / 1000),
   };
 }
 
-export async function consumeQuota(userId: string, tier: UserTier, hasImage = false): Promise<{ allowed: boolean; quota: QuotaInfo }> {
-  const quota = await getQuotaInfo(userId, tier);
+export async function consumeQuota(
+  userId: string,
+  tier: UserTier,
+  hasImage = false,
+  entitlement: SubscriptionEntitlement | null = null,
+): Promise<{ allowed: boolean; quota: QuotaInfo }> {
+  const quota = await getQuotaInfo(userId, tier, entitlement);
   if (quota.remaining <= 0 || (hasImage && quota.imageRemaining <= 0)) {
     return { allowed: false, quota };
   }
@@ -599,7 +622,7 @@ export async function saveExtractedItem(
   const id = `item_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   const nowIso = new Date().toISOString();
   const capturedAt = context?.currentDate || nowIso;
-  const sourceContentType: StoredReminderItem['source']['contentType'] =
+  const sourceContentType: NonNullable<StoredReminderItem['source']>['contentType'] =
     sourceType === 'multimodal' ? 'MULTIMODAL' : sourceType === 'text' ? 'TEXT' : sourceType === 'url' ? 'URL' : 'IMAGE';
   const source = {
     contentType: sourceContentType,

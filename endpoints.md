@@ -76,6 +76,8 @@ Authorization: Bearer <firebase-id-token>
 
 For a premium account with an active subscription, `subscription.tier` is `"premium"`, `status` reflects the Google Play state (`active`, `in_grace_period`, `canceled`, etc.), and `quota.limit`/`imageLimit` are `250`.
 
+Free quota resets at the next UTC calendar-month boundary. Pro quota resets when the backend observes a new verified Google Play subscription expiry period; duplicate verification/RTDN deliveries for the same period do not reset it. During grace period, Pro access continues but quota does not refill until a new billing period is verified. `resetInSeconds` reports time remaining to the applicable reset boundary.
+
 **Errors**
 - `401` — missing/invalid/expired Firebase token.
 - `503` — Firestore entitlement lookup failed.
