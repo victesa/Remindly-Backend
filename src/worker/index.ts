@@ -537,6 +537,41 @@ const endpointHandler = {
         });
       }
 
+      if ((pathname === '/invite' || pathname === '/invite/') && request.method === 'GET') {
+        const ref = url.searchParams.get('ref')?.trim() || '';
+        const packageName = env.GOOGLE_PLAY_PACKAGE_NAME || 'com.victorkirui.remindly';
+        const playStoreBase = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageName)}`;
+        const targetUrl = ref
+          ? `${playStoreBase}&referrer=${encodeURIComponent(`utm_source=referral&utm_content=${ref}&ref=${ref}`)}`
+          : playStoreBase;
+
+        console.log(JSON.stringify({
+          event: 'referral_invite_click',
+          referralCode: ref || null,
+          destination: targetUrl,
+          requestId,
+          timestamp: new Date().toISOString(),
+          userAgent: request.headers.get('user-agent'),
+          ip: request.headers.get('cf-connecting-ip'),
+        }));
+
+        ctx.waitUntil(logOperation({
+          requestId,
+          userId: ref ? `ref:${ref}` : 'anonymous',
+          userTier: 'free',
+          endpoint: '/invite',
+          method: 'GET',
+          statusCode: 302,
+          latencyMs: 0,
+          hasText: false,
+          hasImage: false,
+          hasUrl: Boolean(ref),
+          cached: false,
+        }).catch(() => undefined));
+
+        return Response.redirect(targetUrl, 302);
+      }
+
       if (pathname === '/v1/ai-status' && request.method === 'GET') {
         if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
           return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
@@ -772,10 +807,13 @@ const endpointHandler = {
       if (pathname === '/v1/referral/code' && (request.method === 'GET' || request.method === 'POST')) {
         try {
           const referral = await getOrCreateUserReferralCode(user.uid, user.name);
+          const origin = env.APP_URL && env.APP_URL !== 'MY_APP_URL'
+            ? env.APP_URL.replace(/\/+$/, '')
+            : url.origin;
           return jsonResponse({
             success: true,
             referralCode: referral.referralCode,
-            inviteUrl: `https://remindly.app/invite?ref=${encodeURIComponent(referral.referralCode)}`,
+            inviteUrl: `${origin}/invite?ref=${encodeURIComponent(referral.referralCode)}`,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Failed to retrieve referral code.';

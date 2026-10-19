@@ -98,6 +98,20 @@ $referralCode = $codeResp.referralCode
 Write-Host "     Referral Code Created: $referralCode" -ForegroundColor White
 Write-Host "     Invite URL:            $($codeResp.inviteUrl)" -ForegroundColor White
 
+Write-Section "Step 1b: Invite Redirect Route (/invite?ref=...)"
+try {
+  $inviteReq = Invoke-WebRequest -Method Get -Uri "$BaseUrl/invite?ref=$referralCode" -MaximumRedirection 0 -ErrorAction Stop
+  Write-Host "  -> Testing: GET /invite?ref=$referralCode (HTTP 302 redirect)... PASSED [302 Found]" -ForegroundColor Green
+  Write-Host "     Destination: $($inviteReq.Headers.Location)" -ForegroundColor White
+} catch {
+  if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 302) {
+    Write-Host "  -> Testing: GET /invite?ref=$referralCode (HTTP 302 redirect)... PASSED [302 Found]" -ForegroundColor Green
+    Write-Host "     Destination: $($_.Exception.Response.Headers['Location'])" -ForegroundColor White
+  } else {
+    Write-Host "  -> Testing: GET /invite?ref=$referralCode... FAILED: $($_.Exception.Message)" -ForegroundColor Red
+  }
+}
+
 Write-Section "Step 2: Self-Referral Prevention"
 $selfReferral = Test-Endpoint -Description "POST /v1/referral/claim (referrer claiming their own code)" -ExpectedStatus 400 -ExpectedErrorMessage "Users cannot claim their own referral code." -Action {
   $body = @{ referralCode = $referralCode } | ConvertTo-Json

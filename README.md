@@ -86,6 +86,7 @@ Remindly includes backend support for an install-referrer program that rewards n
 - **`users/{uid}/referral/current`**: Per-user tracking document (`referredBy`, `referrerUid`, `promoCodeAssigned`, `status`: `"none"` | `"code_assigned"` | `"redeemed"`, `claimedAt`, `assignedAt`, `redeemedAt`, `updatedAt`).
 
 ### Client Endpoints
+- `GET /invite?ref=<referralCode>` — Public browser redirect route. Logs the incoming referral code and redirects with HTTP 302 directly to the official Google Play Store listing with the install referrer parameter attached.
 - `POST /v1/referral/claim` — Body: `{ "referralCode": "REMINDLY-JOHN12" }`. Associates the authenticated user with the referrer upon install detection. Rejects self-referrals and conflicting secondary claims; idempotent on retries.
 - `GET /v1/referral/reward` — Assigns an unused Google Play promo code from the pool to the referred user. Returns `{ success: true, promoCode, redemptionUrl }`. Returns `404` if pool is empty or `400` if already claimed.
 - `GET /v1/referral/code` — Fetches or creates the authenticated user's own referral code and invite link.

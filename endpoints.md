@@ -430,6 +430,23 @@ After this call, refresh the Firebase ID token (`getIdToken(true)`) — the back
 
 ---
 
+## GET /invite
+
+Browser-facing invite link redirector. No authentication required.
+Accepts an optional referral code in the `ref` query parameter, logs the referral click, and returns an HTTP 302 redirect sending the user's browser directly to the official Google Play Store listing.
+
+**Request**
+```http
+GET /invite?ref=REMINDLY-JOHN12
+```
+
+**Response 302 Found**
+```http
+Location: https://play.google.com/store/apps/details?id=com.victorkirui.remindly&referrer=utm_source%3Dreferral%26utm_content%3DREMINDLY-JOHN12%26ref%3DREMINDLY-JOHN12
+```
+
+---
+
 ## POST /v1/referral/claim
 
 Associates a new user with a referrer when an install referrer or invite link is detected on first launch/sign-in.

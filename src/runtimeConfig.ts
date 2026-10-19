@@ -1,4 +1,5 @@
 export interface RuntimeConfig {
+  APP_URL?: string;
   GEMINI_API_KEY?: string;
   FIREBASE_SERVICE_ACCOUNT_JSON?: string;
   FIREBASE_PROJECT_ID?: string;
