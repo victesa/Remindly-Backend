@@ -76,6 +76,43 @@ Endpoints:
 - `GET /v1/billing/entitlement` — returns the caller's stored entitlement (used for cross-device sync).
 - `POST /v1/billing/rtdn` — Pub/Sub push endpoint. Looks up the `uid` from the purchase-token mapping, re-verifies with Google Play, and updates the stored entitlement automatically on renewal, cancellation, grace period, hold, or expiry.
 
+## Google Play Referral Program
+
+Remindly includes backend support for an install-referrer program that rewards new users with Google Play subscription promo codes for free trials.
+
+### Data Models & Firestore Collections
+- **`referrals`**: Stores unique referral codes (`userId`, `referralCode`, `createdAt`) for invite links (`https://remindly.app/invite?ref=...`).
+- **`promoCodes`**: Pool of Google Play subscription promo codes (`code`, `status`: `"available"` | `"assigned"` | `"redeemed"`, `assignedTo`, `assignedAt`, `createdAt`).
+- **`users/{uid}/referral/current`**: Per-user tracking document (`referredBy`, `referrerUid`, `promoCodeAssigned`, `status`: `"none"` | `"code_assigned"` | `"redeemed"`, `claimedAt`, `assignedAt`, `redeemedAt`, `updatedAt`).
+
+### Client Endpoints
+- `POST /v1/referral/claim` — Body: `{ "referralCode": "REMINDLY-JOHN12" }`. Associates the authenticated user with the referrer upon install detection. Rejects self-referrals and conflicting secondary claims; idempotent on retries.
+- `GET /v1/referral/reward` — Assigns an unused Google Play promo code from the pool to the referred user. Returns `{ success: true, promoCode, redemptionUrl }`. Returns `404` if pool is empty or `400` if already claimed.
+- `GET /v1/referral/code` — Fetches or creates the authenticated user's own referral code and invite link.
+- `GET /v1/referral/status` — Checks referral tracking state, assigned promo code, and invite link.
+
+### Bulk Promo Code Upload (Admin / Maintenance)
+Whenever new subscription promo codes are exported from the Google Play Console each quarter, upload them to the pool using either the CLI script or the admin HTTP endpoint:
+
+**CLI Script:**
+```bash
+# Upload default ./promo-codes file:
+npm run upload-promo-codes
+
+# Or specify a custom CSV/text file:
+npm run upload-promo-codes -- ./exports/play_promo_codes_q1.csv
+```
+
+**Admin Endpoint:**
+```bash
+curl -X POST https://<your-worker-domain>/v1/admin/promo-codes/upload \
+  -H "X-Analytics-Key: <ANALYTICS_ADMIN_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"codes": ["PROMO1", "PROMO2"]}'
+```
+
+The uploader automatically deduplicates codes, skips already-existing codes in Firestore without overwriting assigned/redeemed states, and commits in batches.
+
 ## Analytics
 
 Set `ANALYTICS_ADMIN_KEY` as a Worker secret, then query:

@@ -1,5 +1,5 @@
 import { getRuntimeConfig } from '../runtimeConfig.js';
-import type { AuthUser } from '../types.js';
+import type { AuthUser, UserTier } from '../types.js';
 
 const FIREBASE_CERTS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
 const CERT_TTL_MS = 60 * 60 * 1000;
@@ -51,6 +51,18 @@ export async function verifyFirebaseIdToken(authorizationHeader: string | null):
   }
 
   const token = authorizationHeader.slice(7).trim();
+  if (getRuntimeConfig().ALLOW_DEV_AUTH === 'true' && token.startsWith('remindly_test_')) {
+    const parts = token.split('_');
+    const tier: UserTier = parts[2] === 'premium' ? 'premium' : 'free';
+    const uid = parts.slice(3).join('_') || 'test-user-1';
+    return {
+      uid,
+      email: `${uid}@example.com`,
+      tier,
+      name: `${tier.toUpperCase()} Tester`,
+    };
+  }
+
   const parts = token.split('.');
   if (parts.length !== 3) {
     throw new Error('Malformed Firebase ID token.');

@@ -1,4 +1,19 @@
-import { AuthUser, ExtractedReminderData, ExtractionStrategy, LogEntry, QuotaInfo, StoredReminderItem, SubscriptionEntitlement, SubscriptionStatus, UserTier } from '../types.js';
+import {
+  AuthUser,
+  ExtractedReminderData,
+  ExtractionStrategy,
+  LogEntry,
+  PromoCodeDoc,
+  PromoCodeStatus,
+  QuotaInfo,
+  ReferralDoc,
+  StoredReminderItem,
+  SubscriptionEntitlement,
+  SubscriptionStatus,
+  UserReferralStatus,
+  UserReferralTracking,
+  UserTier,
+} from '../types.js';
 import { getRuntimeConfig } from '../runtimeConfig.js';
 
 export const ANDROID_PUBLISHER_SCOPE = 'https://www.googleapis.com/auth/androidpublisher';
@@ -16,8 +31,10 @@ type FirestoreValue =
   | { booleanValue: boolean }
   | { integerValue: string }
   | { doubleValue: number }
+  | { timestampValue: string }
   | { arrayValue: { values?: FirestoreValue[] } }
   | { mapValue: { fields?: Record<string, FirestoreValue> } };
+
 
 interface AccessTokenCache {
   accessToken: string;
@@ -95,6 +112,10 @@ const IDEMPOTENCY_CACHE_COLLECTION = 'idempotencyCache';
 const PAYLOAD_DEDUPE_COLLECTION = 'payloadDedupeCache';
 const PURCHASE_TOKEN_MAP_COLLECTION = 'purchaseTokenMap';
 const BILLING_SUBSCRIPTION_DOC = 'current';
+export const REFERRALS_COLLECTION = 'referrals';
+export const PROMO_CODES_COLLECTION = 'promoCodes';
+export const USER_REFERRAL_SUBCOLLECTION = 'referral';
+export const USER_REFERRAL_DOC = 'current';
 const ANALYTICS_USERS_COLLECTION = 'analyticsUsers';
 const ANALYTICS_CAPTURES_COLLECTION = 'analyticsCaptures';
 const EXTRACTION_ANOMALIES_COLLECTION = 'extractionAnomalies';
@@ -254,6 +275,9 @@ function toFirestoreValue(value: unknown): FirestoreValue {
   if (value === null || value === undefined) {
     return { nullValue: 'NULL_VALUE' };
   }
+  if (value instanceof Date) {
+    return { timestampValue: value.toISOString() };
+  }
   if (typeof value === 'string') {
     return { stringValue: value };
   }
@@ -284,6 +308,7 @@ function fromFirestoreValue(value?: FirestoreValue): unknown {
   if ('booleanValue' in value) return value.booleanValue;
   if ('integerValue' in value) return Number(value.integerValue);
   if ('doubleValue' in value) return value.doubleValue;
+  if ('timestampValue' in value) return (value as { timestampValue: string }).timestampValue;
   if ('arrayValue' in value) {
     return (value.arrayValue.values || []).map((entry) => fromFirestoreValue(entry));
   }
@@ -877,7 +902,7 @@ async function markItemDeleted(path: string): Promise<void> {
 }
 
 export async function deleteUserData(userId: string): Promise<{ deletedCount: number }> {
-  const collections = ['captures', 'item_debug'];
+  const collections = ['captures', 'item_debug', USER_REFERRAL_SUBCOLLECTION];
   let deletedCount = 0;
 
   for (const collection of collections) {
@@ -1283,3 +1308,487 @@ export async function getAnalyticsSummary(since?: string): Promise<Record<string
     },
   };
 }
+
+export async function commitFirestoreWrites(writes: unknown[]): Promise<{ success: boolean; error?: string }> {
+  if (writes.length === 0) {
+    return { success: true };
+  }
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+  const url = `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents:commit`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ writes }),
+  });
+  if (response.ok) {
+    return { success: true };
+  }
+  const errText = await response.text().catch(() => '');
+  return { success: false, error: `Firestore commit failed: HTTP ${response.status} ${errText}` };
+}
+
+export async function queryAvailablePromoCodes(limit = 10): Promise<Array<PromoCodeDoc & { id: string; updateTime?: string }>> {
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+  const url = `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents:runQuery`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: PROMO_CODES_COLLECTION }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'status' },
+              op: 'EQUAL',
+              value: { stringValue: 'available' },
+            },
+          },
+          limit,
+        },
+      }),
+    });
+
+    if (response.ok) {
+      const rows = await response.json() as Array<{ document?: FirestoreDocument & { updateTime?: string } }>;
+      const docs = rows
+        .filter((row) => row.document)
+        .map((row) => ({
+          ...decodeDocument<PromoCodeDoc>(row.document as FirestoreDocument),
+          id: documentIdFromName(row.document?.name),
+          updateTime: row.document?.updateTime,
+        }))
+        .filter((doc) => doc.status === 'available');
+
+      if (docs.length > 0) {
+        return docs;
+      }
+    }
+  } catch (err) {
+    console.warn('[PromoCodes] runQuery failed, falling back to list:', err);
+  }
+
+  // Fallback: listDocuments and filter in-memory if query failed or index not ready
+  try {
+    const docs = await listDocuments<PromoCodeDoc>(PROMO_CODES_COLLECTION, { pageSize: 50 });
+    return docs
+      .filter((doc) => doc.status === 'available')
+      .slice(0, limit)
+      .map((doc) => ({
+        ...doc,
+        id: doc.id || doc.code,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function getReferralByCode(referralCode: string): Promise<ReferralDoc | null> {
+  const cleanCode = referralCode.trim().toUpperCase();
+  if (!cleanCode) return null;
+
+  // 1. Direct document lookup by code ID
+  const direct = await getDocument<ReferralDoc>(documentPath(REFERRALS_COLLECTION, cleanCode));
+  if (direct && direct.userId) {
+    return {
+      userId: direct.userId,
+      referralCode: direct.referralCode || cleanCode,
+      createdAt: direct.createdAt || new Date().toISOString(),
+    };
+  }
+
+  // 2. Query by referralCode field if document ID was auto-generated
+  try {
+    const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+    const url = `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents:runQuery`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: REFERRALS_COLLECTION }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'referralCode' },
+              op: 'EQUAL',
+              value: { stringValue: cleanCode },
+            },
+          },
+          limit: 1,
+        },
+      }),
+    });
+
+    if (response.ok) {
+      const rows = await response.json() as Array<{ document?: FirestoreDocument }>;
+      const found = rows.find((row) => row.document);
+      if (found?.document) {
+        const decoded = decodeDocument<ReferralDoc>(found.document);
+        if (decoded.userId) {
+          return {
+            userId: decoded.userId,
+            referralCode: decoded.referralCode || cleanCode,
+            createdAt: decoded.createdAt || new Date().toISOString(),
+          };
+        }
+      }
+    }
+  } catch {
+    // Ignore query failure
+  }
+
+  return null;
+}
+
+export async function getReferralByUserId(userId: string): Promise<ReferralDoc | null> {
+  try {
+    const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+    const url = `https://firestore.googleapis.com/v1/projects/${token.projectId}/databases/(default)/documents:runQuery`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: REFERRALS_COLLECTION }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'userId' },
+              op: 'EQUAL',
+              value: { stringValue: userId },
+            },
+          },
+          limit: 1,
+        },
+      }),
+    });
+
+    if (response.ok) {
+      const rows = await response.json() as Array<{ document?: FirestoreDocument }>;
+      const found = rows.find((row) => row.document);
+      if (found?.document) {
+        const decoded = decodeDocument<ReferralDoc>(found.document);
+        return {
+          userId: decoded.userId,
+          referralCode: decoded.referralCode || documentIdFromName(found.document.name),
+          createdAt: decoded.createdAt || new Date().toISOString(),
+        };
+      }
+    }
+  } catch {
+    // Query failure fallback
+  }
+
+  return null;
+}
+
+export async function getOrCreateUserReferralCode(userId: string, userName?: string): Promise<ReferralDoc> {
+  const existing = await getReferralByUserId(userId);
+  if (existing) {
+    return existing;
+  }
+
+  const cleanName = userName
+    ? userName.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5)
+    : '';
+  const randomSuffix = crypto.randomUUID().replace(/[^A-Z0-9]/gi, '').slice(0, 4).toUpperCase();
+  const code = cleanName
+    ? `REMINDLY-${cleanName}${randomSuffix}`
+    : `REMINDLY-${userId.slice(0, 4).toUpperCase()}${randomSuffix}`;
+
+  const docData: ReferralDoc = {
+    userId,
+    referralCode: code,
+    createdAt: new Date().toISOString(),
+  };
+
+  await setDocument(documentPath(REFERRALS_COLLECTION, code), docData as unknown as Record<string, unknown>);
+  return docData;
+}
+
+export async function getUserReferralTracking(userId: string): Promise<UserReferralTracking | null> {
+  const path = documentPath('users', userId, USER_REFERRAL_SUBCOLLECTION, USER_REFERRAL_DOC);
+  const doc = await getDocument<UserReferralTracking>(path);
+  if (!doc) {
+    return null;
+  }
+  return {
+    userId: doc.userId || userId,
+    referredBy: doc.referredBy,
+    referrerUid: doc.referrerUid,
+    promoCodeAssigned: doc.promoCodeAssigned,
+    status: (doc.status as UserReferralStatus) || 'none',
+    claimedAt: doc.claimedAt,
+    assignedAt: doc.assignedAt,
+    redeemedAt: doc.redeemedAt,
+    updatedAt: doc.updatedAt || new Date(0).toISOString(),
+  };
+}
+
+export async function saveUserReferralTracking(tracking: UserReferralTracking): Promise<void> {
+  const path = documentPath('users', tracking.userId, USER_REFERRAL_SUBCOLLECTION, USER_REFERRAL_DOC);
+  await setDocument(path, tracking as unknown as Record<string, unknown>);
+}
+
+export async function claimReferral(userId: string, referralCode: string): Promise<{ success: boolean; message: string; referrerUid: string }> {
+  const cleanCode = referralCode.trim().toUpperCase();
+  if (!cleanCode) {
+    throw new Error('referralCode is required.');
+  }
+
+  const referral = await getReferralByCode(cleanCode);
+  if (!referral) {
+    throw new Error('Referral code not found.');
+  }
+
+  if (referral.userId === userId) {
+    throw new Error('Users cannot claim their own referral code.');
+  }
+
+  const existingTracking = await getUserReferralTracking(userId);
+  if (existingTracking && existingTracking.referredBy) {
+    if (existingTracking.referredBy.toUpperCase() === cleanCode) {
+      // Idempotent retry on first launch: already claimed with this referral code
+      return {
+        success: true,
+        message: 'Referral claimed successfully',
+        referrerUid: referral.userId,
+      };
+    }
+    throw new Error('Referral has already been claimed by this user.');
+  }
+
+  const now = new Date().toISOString();
+  const trackingData: UserReferralTracking = {
+    userId,
+    referredBy: cleanCode,
+    referrerUid: referral.userId,
+    status: existingTracking?.status || 'none',
+    promoCodeAssigned: existingTracking?.promoCodeAssigned,
+    claimedAt: existingTracking?.claimedAt || now,
+    assignedAt: existingTracking?.assignedAt,
+    redeemedAt: existingTracking?.redeemedAt,
+    updatedAt: now,
+  };
+
+  await saveUserReferralTracking(trackingData);
+
+  return {
+    success: true,
+    message: 'Referral claimed successfully',
+    referrerUid: referral.userId,
+  };
+}
+
+export async function assignReferralRewardPromoCode(userId: string): Promise<{ success: boolean; promoCode: string; redemptionUrl: string }> {
+  const tracking = await getUserReferralTracking(userId);
+
+  if (!tracking || !tracking.referredBy) {
+    throw new Error('No referral record found for this user.');
+  }
+
+  if (tracking.status === 'code_assigned' || tracking.status === 'redeemed' || tracking.promoCodeAssigned) {
+    throw new Error('Referral reward has already been claimed.');
+  }
+
+  const availableCodes = await queryAvailablePromoCodes(5);
+  if (availableCodes.length === 0) {
+    throw new Error('No promo codes available');
+  }
+
+  const token = await getGoogleAccessToken(DATASTORE_SCOPE);
+  const now = new Date().toISOString();
+
+  for (const candidate of availableCodes) {
+    const code = candidate.code || candidate.id;
+    if (!code) continue;
+
+    const promoDocPath = documentPath(PROMO_CODES_COLLECTION, code);
+    const userTrackingPath = documentPath('users', userId, USER_REFERRAL_SUBCOLLECTION, USER_REFERRAL_DOC);
+
+    const promoWrite: Record<string, unknown> = {
+      update: {
+        name: `projects/${token.projectId}/databases/(default)/documents/${promoDocPath}`,
+        fields: (toFirestoreValue({
+          code,
+          status: 'assigned',
+          assignedTo: userId,
+          assignedAt: now,
+        }) as { mapValue: { fields: Record<string, FirestoreValue> } }).mapValue.fields || {},
+      },
+      updateMask: {
+        fieldPaths: ['status', 'assignedTo', 'assignedAt'],
+      },
+    };
+
+    if (candidate.updateTime) {
+      promoWrite.currentDocument = { updateTime: candidate.updateTime };
+    } else {
+      promoWrite.currentDocument = { exists: true };
+    }
+
+    const updatedTracking: UserReferralTracking = {
+      ...tracking,
+      promoCodeAssigned: code,
+      status: 'code_assigned',
+      assignedAt: now,
+      updatedAt: now,
+    };
+
+    const userWrite = {
+      update: {
+        name: `projects/${token.projectId}/databases/(default)/documents/${userTrackingPath}`,
+        fields: (toFirestoreValue(updatedTracking as unknown as Record<string, unknown>) as { mapValue: { fields: Record<string, FirestoreValue> } }).mapValue.fields || {},
+      },
+    };
+
+    const commitResult = await commitFirestoreWrites([promoWrite, userWrite]);
+    if (commitResult.success) {
+      return {
+        success: true,
+        promoCode: code,
+        redemptionUrl: `https://play.google.com/redeem?code=${encodeURIComponent(code)}`,
+      };
+    }
+  }
+
+  // Retry once with new batch if race condition occurred
+  const retryCodes = await queryAvailablePromoCodes(3);
+  for (const candidate of retryCodes) {
+    const code = candidate.code || candidate.id;
+    if (!code) continue;
+
+    const promoDocPath = documentPath(PROMO_CODES_COLLECTION, code);
+    const userTrackingPath = documentPath('users', userId, USER_REFERRAL_SUBCOLLECTION, USER_REFERRAL_DOC);
+
+    const promoWrite: Record<string, unknown> = {
+      update: {
+        name: `projects/${token.projectId}/databases/(default)/documents/${promoDocPath}`,
+        fields: (toFirestoreValue({
+          code,
+          status: 'assigned',
+          assignedTo: userId,
+          assignedAt: now,
+        }) as { mapValue: { fields: Record<string, FirestoreValue> } }).mapValue.fields || {},
+      },
+      updateMask: {
+        fieldPaths: ['status', 'assignedTo', 'assignedAt'],
+      },
+    };
+
+    if (candidate.updateTime) {
+      promoWrite.currentDocument = { updateTime: candidate.updateTime };
+    }
+
+    const updatedTracking: UserReferralTracking = {
+      ...tracking,
+      promoCodeAssigned: code,
+      status: 'code_assigned',
+      assignedAt: now,
+      updatedAt: now,
+    };
+
+    const userWrite = {
+      update: {
+        name: `projects/${token.projectId}/databases/(default)/documents/${userTrackingPath}`,
+        fields: (toFirestoreValue(updatedTracking as unknown as Record<string, unknown>) as { mapValue: { fields: Record<string, FirestoreValue> } }).mapValue.fields || {},
+      },
+    };
+
+    const commitResult = await commitFirestoreWrites([promoWrite, userWrite]);
+    if (commitResult.success) {
+      return {
+        success: true,
+        promoCode: code,
+        redemptionUrl: `https://play.google.com/redeem?code=${encodeURIComponent(code)}`,
+      };
+    }
+  }
+
+  throw new Error('No promo codes available');
+}
+
+export async function markUserReferralRedeemed(userId: string): Promise<boolean> {
+  const tracking = await getUserReferralTracking(userId);
+  if (!tracking || tracking.status !== 'code_assigned') {
+    return false;
+  }
+
+  const now = new Date().toISOString();
+  tracking.status = 'redeemed';
+  tracking.redeemedAt = now;
+  tracking.updatedAt = now;
+  await saveUserReferralTracking(tracking);
+
+  if (tracking.promoCodeAssigned) {
+    const promoPath = documentPath(PROMO_CODES_COLLECTION, tracking.promoCodeAssigned);
+    const existingPromo = await getDocument<PromoCodeDoc>(promoPath).catch(() => null);
+    if (existingPromo && existingPromo.status !== 'redeemed') {
+      await setDocument(promoPath, {
+        ...existingPromo,
+        status: 'redeemed',
+        redeemedAt: now,
+      });
+    }
+  }
+
+  return true;
+}
+
+export async function bulkUploadPromoCodes(rawCodes: string[]): Promise<{ added: number; skipped: number; total: number }> {
+  const cleanedSet = new Set<string>();
+  for (const raw of rawCodes) {
+    const trimmed = raw.trim().toUpperCase().replace(/["']/g, '');
+    if (!trimmed || trimmed === 'CODE' || trimmed === 'PROMOTION CODE' || trimmed === 'PROMO CODE' || trimmed.startsWith('#')) {
+      continue;
+    }
+    // Google Play subscription promo codes are alphanumeric
+    if (/^[A-Z0-9]{8,40}$/.test(trimmed)) {
+      cleanedSet.add(trimmed);
+    }
+  }
+
+  const uniqueCodes = Array.from(cleanedSet);
+  let added = 0;
+  let skipped = 0;
+
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < uniqueCodes.length; i += BATCH_SIZE) {
+    const batch = uniqueCodes.slice(i, i + BATCH_SIZE);
+    const now = new Date().toISOString();
+
+    for (const code of batch) {
+      try {
+        const existing = await getDocument<PromoCodeDoc>(documentPath(PROMO_CODES_COLLECTION, code));
+        if (existing) {
+          skipped++;
+        } else {
+          await setDocument(documentPath(PROMO_CODES_COLLECTION, code), {
+            code,
+            status: 'available',
+            createdAt: now,
+          });
+          added++;
+        }
+      } catch (err) {
+        console.error(`Failed to insert promo code ${code}:`, err);
+        skipped++;
+      }
+    }
+  }
+
+  return { added, skipped, total: uniqueCodes.length };
+}
+

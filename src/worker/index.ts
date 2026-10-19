@@ -6,6 +6,9 @@ import { ExtractedReminderData, ExtractionResponse, QuotaInfo, StoredReminderIte
 import {
   IDEMPOTENCY_CACHE_COLLECTION,
   PAYLOAD_DEDUPE_COLLECTION,
+  assignReferralRewardPromoCode,
+  bulkUploadPromoCodes,
+  claimReferral,
   clearLogs,
   consumeQuota,
   deleteUserData,
@@ -14,16 +17,20 @@ import {
   getAnalyticsSummary,
   getCachedEntry,
   getExtractionAnomalies,
+  getOrCreateUserReferralCode,
   getQuotaInfo,
   getRecentLogs,
+  getReferralByUserId,
   getUserEntitlement,
   getUserIdForPurchaseToken,
   getUserItemsDelta,
   getUserItems,
+  getUserReferralTracking,
   isEntitlementActive,
   logExtractionAnomaly,
   logOperation,
   mapPurchaseTokenToUser,
+  markUserReferralRedeemed,
   requestPasswordReset,
   resetAllQuotas,
   resetUserQuota,
@@ -557,6 +564,31 @@ const endpointHandler = {
         return jsonResponse({ success: true, count: anomalies.length, anomalies });
       }
 
+      if (pathname === '/v1/admin/promo-codes/upload' && request.method === 'POST') {
+        if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
+          return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
+        }
+        let codeList: string[] = [];
+        const contentType = request.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const body = await request.json().catch(() => ({})) as { codes?: string[] };
+          if (Array.isArray(body.codes)) {
+            codeList = body.codes;
+          }
+        } else {
+          const text = await request.text();
+          codeList = text.split(/[\r\n,]+/);
+        }
+
+        const result = await bulkUploadPromoCodes(codeList);
+        return jsonResponse({
+          success: true,
+          added: result.added,
+          skipped: result.skipped,
+          total: result.total,
+        });
+      }
+
       if (pathname === '/v1/auth/mint-token' && request.method === 'POST') {
         if (getRuntimeConfig().ALLOW_DEV_AUTH !== 'true') {
           return jsonResponse({ success: false, error: 'Not found.' }, { status: 404 });
@@ -645,6 +677,9 @@ const endpointHandler = {
           rtdnStage = 'entitlement-storage';
           await saveUserEntitlement(entitlement);
           await setFirebaseTierClaim(entitlement.userId, entitlement.tier).catch(() => undefined);
+          if (entitlement.tier === 'premium') {
+            ctx.waitUntil(markUserReferralRedeemed(entitlement.userId).catch(() => undefined));
+          }
           return jsonResponse({ success: true });
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'RTDN processing failed.';
@@ -692,6 +727,88 @@ const endpointHandler = {
           },
           quota,
         });
+      }
+
+      if (pathname === '/v1/referral/claim' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const referralCode = typeof body.referralCode === 'string' ? body.referralCode.trim() : '';
+        if (!referralCode) {
+          return jsonResponse({ success: false, error: 'referralCode is required.' }, { status: 400 });
+        }
+
+        try {
+          const result = await claimReferral(user.uid, referralCode);
+          return jsonResponse({
+            success: true,
+            message: result.message,
+            referrerUid: result.referrerUid,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to claim referral.';
+          const status = message === 'Referral code not found.' ? 404
+            : message === 'referralCode is required.' || message.includes('cannot claim') || message.includes('already been claimed') ? 400
+            : 500;
+          return jsonResponse({ success: false, error: message }, { status });
+        }
+      }
+
+      if (pathname === '/v1/referral/reward' && request.method === 'GET') {
+        try {
+          const result = await assignReferralRewardPromoCode(user.uid);
+          return jsonResponse({
+            success: true,
+            promoCode: result.promoCode,
+            redemptionUrl: result.redemptionUrl,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to claim referral reward.';
+          const status = message === 'No promo codes available' ? 404
+            : message.includes('already been claimed') || message.includes('No referral record') ? 400
+            : 500;
+          return jsonResponse({ success: false, error: message }, { status });
+        }
+      }
+
+      if (pathname === '/v1/referral/code' && (request.method === 'GET' || request.method === 'POST')) {
+        try {
+          const referral = await getOrCreateUserReferralCode(user.uid, user.name);
+          return jsonResponse({
+            success: true,
+            referralCode: referral.referralCode,
+            inviteUrl: `https://remindly.app/invite?ref=${encodeURIComponent(referral.referralCode)}`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to retrieve referral code.';
+          return jsonResponse({ success: false, error: message }, { status: 500 });
+        }
+      }
+
+      if (pathname === '/v1/referral/status' && request.method === 'GET') {
+        try {
+          const tracking = await getUserReferralTracking(user.uid);
+          const myCode = await getReferralByUserId(user.uid);
+          return jsonResponse({
+            success: true,
+            referral: tracking ? {
+              referredBy: tracking.referredBy || null,
+              referrerUid: tracking.referrerUid || null,
+              promoCodeAssigned: tracking.promoCodeAssigned || null,
+              status: tracking.status,
+              claimedAt: tracking.claimedAt || null,
+              assignedAt: tracking.assignedAt || null,
+              redeemedAt: tracking.redeemedAt || null,
+            } : {
+              referredBy: null,
+              referrerUid: null,
+              promoCodeAssigned: null,
+              status: 'none',
+            },
+            myReferralCode: myCode?.referralCode || null,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to get referral status.';
+          return jsonResponse({ success: false, error: message }, { status: 500 });
+        }
       }
 
       if (pathname === '/v1/quota' && request.method === 'GET') {
@@ -744,6 +861,9 @@ const endpointHandler = {
             mapPurchaseTokenToUser(purchaseToken, user.uid, verification.productId),
           ]);
           await setFirebaseTierClaim(user.uid, entitlement.tier).catch(() => undefined);
+          if (entitlement.tier === 'premium') {
+            ctx.waitUntil(markUserReferralRedeemed(user.uid).catch(() => undefined));
+          }
           return jsonResponse({ success: true, entitlement });
         } catch (error) {
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Purchase verification failed.' }, { status: 502 });

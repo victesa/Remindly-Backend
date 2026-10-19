@@ -11,7 +11,8 @@
     "types:worker": "wrangler types",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "upload-promo-codes": "node scripts/upload-promo-codes.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

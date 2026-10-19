@@ -430,6 +430,113 @@ After this call, refresh the Firebase ID token (`getIdToken(true)`) — the back
 
 ---
 
+## POST /v1/referral/claim
+
+Associates a new user with a referrer when an install referrer or invite link is detected on first launch/sign-in.
+
+**Request**
+```http
+POST /v1/referral/claim
+Authorization: Bearer <firebase-id-token>
+Content-Type: application/json
+
+{
+  "referralCode": "REMINDLY-JOHN12"
+}
+```
+
+**Response 200**
+```json
+{
+  "success": true,
+  "message": "Referral claimed successfully",
+  "referrerUid": "user-uid-abc"
+}
+```
+
+**Errors**
+- `400` — `referralCode` is required, or user attempted self-referral, or user already claimed a referral from a different code.
+- `404` — referral code not found.
+- `401` — missing/invalid Firebase ID token.
+
+---
+
+## GET /v1/referral/reward
+
+Assigns an unused Google Play subscription promo code from the pool to the authenticated user who was referred.
+
+**Request**
+```http
+GET /v1/referral/reward
+Authorization: Bearer <firebase-id-token>
+```
+
+**Response 200**
+```json
+{
+  "success": true,
+  "promoCode": "ABC123XYZ",
+  "redemptionUrl": "https://play.google.com/redeem?code=ABC123XYZ"
+}
+```
+
+**Errors**
+- `400` — User already claimed their referral reward (`Referral reward has already been claimed.`) or user was never referred (`No referral record found for this user.`).
+- `404` — Promo code pool exhausted (`No promo codes available`).
+- `401` — missing/invalid Firebase ID token.
+
+---
+
+## GET /v1/referral/code  (or POST /v1/referral/code)
+
+Returns or generates the authenticated user's unique referral code and shareable invite link.
+
+**Request**
+```http
+GET /v1/referral/code
+Authorization: Bearer <firebase-id-token>
+```
+
+**Response 200**
+```json
+{
+  "success": true,
+  "referralCode": "REMINDLY-JOHN12",
+  "inviteUrl": "https://remindly.app/invite?ref=REMINDLY-JOHN12"
+}
+```
+
+---
+
+## GET /v1/referral/status
+
+Returns the user's current referral status, assigned promo code (if any), and own sharing code.
+
+**Request**
+```http
+GET /v1/referral/status
+Authorization: Bearer <firebase-id-token>
+```
+
+**Response 200**
+```json
+{
+  "success": true,
+  "referral": {
+    "referredBy": "REMINDLY-JOHN12",
+    "referrerUid": "user-uid-abc",
+    "promoCodeAssigned": "ABC123XYZ",
+    "status": "code_assigned",
+    "claimedAt": "2026-10-19T10:00:00.000Z",
+    "assignedAt": "2026-10-19T10:05:00.000Z",
+    "redeemedAt": null
+  },
+  "myReferralCode": "REMINDLY-MARY34"
+}
+```
+
+---
+
 ## POST /v1/quota/reset
 
 Resets the authenticated user's own extraction quota.
@@ -470,5 +577,6 @@ These exist on the server but require an `X-Analytics-Key` admin header, or are 
 - `GET /v1/diagnostics/extraction-anomalies`
 - `GET /v1/logs`
 - `POST /v1/logs/clear`
+- `POST /v1/admin/promo-codes/upload` (bulk uploads promo codes into the pool; header `X-Analytics-Key`)
 - `POST /v1/billing/rtdn` (Google Pub/Sub push only)
 - `POST /v1/auth/mint-token` (disabled unless `ALLOW_DEV_AUTH=true`; local development only)

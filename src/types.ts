@@ -160,3 +160,35 @@ export interface SubscriptionEntitlement {
   source: 'google_play';
   updatedAt: string;
 }
+
+export interface ReferralDoc {
+  userId: string;
+  referralCode: string;
+  createdAt: string;
+}
+
+export type PromoCodeStatus = 'available' | 'assigned' | 'redeemed';
+
+export interface PromoCodeDoc {
+  code: string;
+  status: PromoCodeStatus;
+  assignedTo?: string | null;
+  assignedAt?: string | null;
+  redeemedAt?: string | null;
+  createdAt?: string;
+}
+
+export type UserReferralStatus = 'none' | 'code_assigned' | 'redeemed';
+
+export interface UserReferralTracking {
+  userId: string;
+  referredBy?: string;
+  referrerUid?: string;
+  promoCodeAssigned?: string;
+  status: UserReferralStatus;
+  claimedAt?: string;
+  assignedAt?: string;
+  redeemedAt?: string;
+  updatedAt: string;
+}
+
