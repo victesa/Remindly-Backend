@@ -79,6 +79,18 @@ async function startServer() {
   app.get('/v1/health', healthHandler);
   app.get('/api/health', healthHandler);
 
+  // --- Referral Invite Redirect ---
+  app.get(['/invite', '/invite/'], (req: Request, res: Response) => {
+    const ref = typeof req.query.ref === 'string' ? req.query.ref.trim() : '';
+    const packageName = process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.victorkirui.remindly';
+    const playStoreBase = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageName)}`;
+    const targetUrl = ref
+      ? `${playStoreBase}&referrer=${encodeURIComponent(`utm_source=referral&utm_content=${ref}&ref=${ref}`)}`
+      : playStoreBase;
+
+    res.redirect(302, targetUrl);
+  });
+
   // --- AI Service Status ---
   app.get('/v1/ai-status', async (_req: Request, res: Response) => {
     try {
