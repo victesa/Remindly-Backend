@@ -456,3 +456,33 @@ To prevent client-side timeouts during mobile first-launch attribution (which ty
 | `saveUserReferralTracking` | ~150ms | **~150ms** |
 | **Total Estimated Wall Time** | **~600–785ms** | **~250–300ms** |
 
+---
+
+## 11. Telemetry, Structured Logging & Audit Trails
+
+To ensure complete observability across the referral lifecycle, every stage of the referral program emits both **Cloudflare Workers structured JSON logs** (streamed to Cloudflare Observability) and **persisted Firestore audit records** (stored in `logs/{id}` and accessible via `GET /v1/logs`):
+
+### 11.1 Structured Log Events
+
+| Event Name | Severity | Emitted When | Payload Metadata |
+|---|---|---|---|
+| `referral_invite_click` | `INFO` | User clicks an `/invite?ref=...` web link | `referralCode`, `destination`, `userAgent`, `ip`, `requestId`, `timestamp` |
+| `referral_code_generated` | `INFO` | New referral code is created in Firestore | `userId`, `referralCode`, `timestamp` |
+| `referral_code_retrieved` | `INFO` | User retrieves their existing referral code | `userId`, `referralCode`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_code_failed` | `ERROR` | Code generation or retrieval fails | `userId`, `error`, `statusCode`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_claim_attributed` | `INFO` | Referee is successfully linked to referrer in Firestore | `userId`, `referrerUid`, `referralCode`, `timestamp` |
+| `referral_claim_success` | `INFO` | `POST /v1/referral/claim` succeeds | `userId`, `referralCode`, `referrerUid`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_claim_failed` | `ERROR` | Referral claim is rejected (self-referral, invalid code, duplicate) | `userId`, `referralCode`, `error`, `statusCode`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_reward_success` | `INFO` | Promo code is allocated to referee | `userId`, `promoCode`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_reward_failed` | `ERROR` | Promo code reward claim is rejected or inventory exhausted | `userId`, `error`, `statusCode`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_reward_redeemed` | `INFO` | Referee activates Pro subscription via Google Play RTDN / verification | `userId`, `promoCode`, `referrerUid`, `referredBy`, `timestamp` |
+| `referral_status_checked` | `INFO` | User inspects their referral tracking record | `userId`, `referralStatus`, `latencyMs`, `requestId`, `timestamp` |
+| `referral_status_failed` | `ERROR` | Status inspection fails | `userId`, `error`, `statusCode`, `latencyMs`, `requestId`, `timestamp` |
+| `promo_codes_bulk_uploaded` | `INFO` | Admin uploads batch of subscription promo codes | `added`, `skipped`, `total`, `latencyMs`, `requestId`, `timestamp` |
+
+### 11.2 Background Firestore Audit Logging (`ctx.waitUntil`)
+All referral endpoint handlers write operational audit logs into Firestore collection `logs` using Cloudflare's non-blocking `ctx.waitUntil(logOperation(...))`:
+- **Zero latency impact:** The HTTP response is delivered immediately to the client while the log write finishes in the background.
+- **Admin Dashboard Integration:** Log records include `endpoint`, `statusCode`, `latencyMs`, `userId`, `userTier`, `timestamp`, and `error` (if applicable), making them queryable via `GET /v1/logs` and the Telemetry dashboard tab.
+
+

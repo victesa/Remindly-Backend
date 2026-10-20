@@ -600,6 +600,7 @@ const endpointHandler = {
       }
 
       if (pathname === '/v1/admin/promo-codes/upload' && request.method === 'POST') {
+        const uploadStart = Date.now();
         if (!env.ANALYTICS_ADMIN_KEY || request.headers.get('x-analytics-key') !== env.ANALYTICS_ADMIN_KEY) {
           return jsonResponse({ success: false, error: 'Admin access is unauthorized.' }, { status: 401 });
         }
@@ -616,6 +617,29 @@ const endpointHandler = {
         }
 
         const result = await bulkUploadPromoCodes(codeList);
+        const latencyMs = Date.now() - uploadStart;
+        console.log(JSON.stringify({
+          event: 'promo_codes_bulk_uploaded',
+          requestId,
+          added: result.added,
+          skipped: result.skipped,
+          total: result.total,
+          latencyMs,
+          timestamp: new Date().toISOString(),
+        }));
+        ctx.waitUntil(logOperation({
+          requestId,
+          userId: 'admin',
+          userTier: 'premium',
+          endpoint: '/v1/admin/promo-codes/upload',
+          method: 'POST',
+          statusCode: 200,
+          latencyMs,
+          hasText: false,
+          hasImage: false,
+          hasUrl: false,
+          cached: false,
+        }).catch(() => undefined));
         return jsonResponse({
           success: true,
           added: result.added,
@@ -778,68 +802,248 @@ const endpointHandler = {
       }
 
       if (pathname === '/v1/referral/claim' && request.method === 'POST') {
+        const claimStart = Date.now();
         const body = await request.json().catch(() => ({})) as Record<string, unknown>;
         const referralCode = typeof body.referralCode === 'string' ? body.referralCode.trim() : '';
         if (!referralCode) {
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/claim',
+            method: 'POST',
+            statusCode: 400,
+            latencyMs: Date.now() - claimStart,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+            error: 'referralCode is required.',
+          }).catch(() => undefined));
           return jsonResponse({ success: false, error: 'referralCode is required.' }, { status: 400 });
         }
 
         try {
           const result = await claimReferral(user.uid, referralCode);
+          const latencyMs = Date.now() - claimStart;
+          console.log(JSON.stringify({
+            event: 'referral_claim_success',
+            requestId,
+            userId: user.uid,
+            referralCode,
+            referrerUid: result.referrerUid,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/claim',
+            method: 'POST',
+            statusCode: 200,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+          }).catch(() => undefined));
           return jsonResponse({
             success: true,
             message: result.message,
             referrerUid: result.referrerUid,
           });
         } catch (error) {
+          const latencyMs = Date.now() - claimStart;
           const message = error instanceof Error ? error.message : 'Failed to claim referral.';
           const status = message === 'Referral code not found.' ? 404
             : message === 'referralCode is required.' || message.includes('cannot claim') || message.includes('already been claimed') ? 400
             : 500;
+          console.error(JSON.stringify({
+            event: 'referral_claim_failed',
+            requestId,
+            userId: user.uid,
+            referralCode,
+            error: message,
+            statusCode: status,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/claim',
+            method: 'POST',
+            statusCode: status,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+            error: message,
+          }).catch(() => undefined));
           return jsonResponse({ success: false, error: message }, { status });
         }
       }
 
       if (pathname === '/v1/referral/reward' && request.method === 'GET') {
+        const rewardStart = Date.now();
         try {
           const result = await assignReferralRewardPromoCode(user.uid);
+          const latencyMs = Date.now() - rewardStart;
+          console.log(JSON.stringify({
+            event: 'referral_reward_success',
+            requestId,
+            userId: user.uid,
+            promoCode: result.promoCode,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/reward',
+            method: 'GET',
+            statusCode: 200,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+          }).catch(() => undefined));
           return jsonResponse({
             success: true,
             promoCode: result.promoCode,
             redemptionUrl: result.redemptionUrl,
           });
         } catch (error) {
+          const latencyMs = Date.now() - rewardStart;
           const message = error instanceof Error ? error.message : 'Failed to claim referral reward.';
           const status = message === 'No promo codes available' ? 404
             : message.includes('already been claimed') || message.includes('No referral record') ? 400
             : 500;
+          console.error(JSON.stringify({
+            event: 'referral_reward_failed',
+            requestId,
+            userId: user.uid,
+            error: message,
+            statusCode: status,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/reward',
+            method: 'GET',
+            statusCode: status,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+            error: message,
+          }).catch(() => undefined));
           return jsonResponse({ success: false, error: message }, { status });
         }
       }
 
       if (pathname === '/v1/referral/code' && (request.method === 'GET' || request.method === 'POST')) {
+        const codeStart = Date.now();
         try {
           const referral = await getOrCreateUserReferralCode(user.uid, user.name);
           const origin = env.APP_URL && env.APP_URL !== 'MY_APP_URL'
             ? env.APP_URL.replace(/\/+$/, '')
             : url.origin;
+          const latencyMs = Date.now() - codeStart;
+          console.log(JSON.stringify({
+            event: 'referral_code_retrieved',
+            requestId,
+            userId: user.uid,
+            referralCode: referral.referralCode,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/code',
+            method: request.method,
+            statusCode: 200,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+          }).catch(() => undefined));
           return jsonResponse({
             success: true,
             referralCode: referral.referralCode,
             inviteUrl: `${origin}/invite?ref=${encodeURIComponent(referral.referralCode)}`,
           });
         } catch (error) {
+          const latencyMs = Date.now() - codeStart;
           const message = error instanceof Error ? error.message : 'Failed to retrieve referral code.';
+          console.error(JSON.stringify({
+            event: 'referral_code_failed',
+            requestId,
+            userId: user.uid,
+            error: message,
+            statusCode: 500,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/code',
+            method: request.method,
+            statusCode: 500,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+            error: message,
+          }).catch(() => undefined));
           return jsonResponse({ success: false, error: message }, { status: 500 });
         }
       }
 
       if (pathname === '/v1/referral/status' && request.method === 'GET') {
+        const statusStart = Date.now();
         try {
           const [tracking, myCode] = await Promise.all([
             getUserReferralTracking(user.uid),
             getReferralByUserId(user.uid),
           ]);
+          const latencyMs = Date.now() - statusStart;
+          console.log(JSON.stringify({
+            event: 'referral_status_checked',
+            requestId,
+            userId: user.uid,
+            referralStatus: tracking?.status || 'none',
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/status',
+            method: 'GET',
+            statusCode: 200,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+          }).catch(() => undefined));
           return jsonResponse({
             success: true,
             referral: tracking ? {
@@ -859,7 +1063,31 @@ const endpointHandler = {
             myReferralCode: myCode?.referralCode || null,
           });
         } catch (error) {
+          const latencyMs = Date.now() - statusStart;
           const message = error instanceof Error ? error.message : 'Failed to get referral status.';
+          console.error(JSON.stringify({
+            event: 'referral_status_failed',
+            requestId,
+            userId: user.uid,
+            error: message,
+            statusCode: 500,
+            latencyMs,
+            timestamp: new Date().toISOString(),
+          }));
+          ctx.waitUntil(logOperation({
+            requestId,
+            userId: user.uid,
+            userTier: user.tier || 'free',
+            endpoint: '/v1/referral/status',
+            method: 'GET',
+            statusCode: 500,
+            latencyMs,
+            hasText: false,
+            hasImage: false,
+            hasUrl: false,
+            cached: false,
+            error: message,
+          }).catch(() => undefined));
           return jsonResponse({ success: false, error: message }, { status: 500 });
         }
       }

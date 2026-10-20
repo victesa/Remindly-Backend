@@ -1512,6 +1512,12 @@ export async function getReferralByUserId(userId: string): Promise<ReferralDoc |
 export async function getOrCreateUserReferralCode(userId: string, userName?: string): Promise<ReferralDoc> {
   const existing = await getReferralByUserId(userId);
   if (existing) {
+    console.log(JSON.stringify({
+      event: 'referral_code_retrieved',
+      userId,
+      referralCode: existing.referralCode,
+      timestamp: new Date().toISOString(),
+    }));
     return existing;
   }
 
@@ -1530,6 +1536,12 @@ export async function getOrCreateUserReferralCode(userId: string, userName?: str
   };
 
   await setDocument(documentPath(REFERRALS_COLLECTION, code), docData as unknown as Record<string, unknown>);
+  console.log(JSON.stringify({
+    event: 'referral_code_generated',
+    userId,
+    referralCode: code,
+    timestamp: docData.createdAt,
+  }));
   return docData;
 }
 
@@ -1602,6 +1614,14 @@ export async function claimReferral(userId: string, referralCode: string): Promi
   };
 
   await saveUserReferralTracking(trackingData);
+
+  console.log(JSON.stringify({
+    event: 'referral_claim_attributed',
+    userId,
+    referrerUid: referral.userId,
+    referralCode: cleanCode,
+    timestamp: now,
+  }));
 
   return {
     success: true,
@@ -1761,6 +1781,29 @@ export async function markUserReferralRedeemed(userId: string): Promise<boolean>
       });
     }
   }
+
+  console.log(JSON.stringify({
+    event: 'referral_reward_redeemed',
+    userId,
+    promoCode: tracking.promoCodeAssigned || null,
+    referrerUid: tracking.referrerUid || null,
+    referredBy: tracking.referredBy || null,
+    timestamp: now,
+  }));
+
+  await logOperation({
+    requestId: `redeem_${Date.now()}`,
+    userId,
+    userTier: 'premium',
+    endpoint: '/v1/referral/redeemed',
+    method: 'INTERNAL',
+    statusCode: 200,
+    latencyMs: 0,
+    hasText: false,
+    hasImage: false,
+    hasUrl: false,
+    cached: false,
+  }).catch(() => undefined);
 
   return true;
 }
