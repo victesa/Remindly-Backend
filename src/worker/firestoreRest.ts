@@ -159,6 +159,7 @@ const CATEGORY_ALIAS_MAP: Record<string, ExtractedReminderData['category']> = {
 };
 
 const accessTokenCacheByScope = new Map<string, AccessTokenCache>();
+const inflightTokenPromiseByScope = new Map<string, Promise<AccessTokenCache>>();
 
 function normalizeCategory(raw: unknown): ExtractedReminderData['category'] | null {
   if (typeof raw !== 'string') return null;
@@ -218,52 +219,66 @@ async function getGoogleAccessToken(scope: string): Promise<AccessTokenCache> {
     return cached;
   }
 
-  const serviceAccount = getServiceAccountConfig(scope);
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  const payload = {
-    iss: serviceAccount.clientEmail,
-    scope,
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: nowSeconds,
-    exp: nowSeconds + 3600,
-  };
-
-  const signingInput = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}`;
-  const key = await crypto.subtle.importKey(
-    'pkcs8',
-    pemToArrayBuffer(serviceAccount.privateKey),
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
-  const assertion = `${signingInput}.${base64UrlEncode(signature)}`;
-
-  const body = new URLSearchParams({
-    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-    assertion,
-  });
-
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to obtain Google access token: HTTP ${response.status}`);
+  const existingInflight = inflightTokenPromiseByScope.get(scope);
+  if (existingInflight) {
+    return existingInflight;
   }
 
-  const json = await response.json() as { access_token: string; expires_in: number };
-  const tokenCache: AccessTokenCache = {
-    accessToken: json.access_token,
-    expiresAt: Date.now() + json.expires_in * 1000,
-    projectId: serviceAccount.projectId,
-    clientEmail: serviceAccount.clientEmail,
-  };
-  accessTokenCacheByScope.set(scope, tokenCache);
-  return tokenCache;
+  const tokenPromise = (async () => {
+    try {
+      const serviceAccount = getServiceAccountConfig(scope);
+      const header = { alg: 'RS256', typ: 'JWT' };
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const payload = {
+        iss: serviceAccount.clientEmail,
+        scope,
+        aud: 'https://oauth2.googleapis.com/token',
+        iat: nowSeconds,
+        exp: nowSeconds + 3600,
+      };
+
+      const signingInput = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}`;
+      const key = await crypto.subtle.importKey(
+        'pkcs8',
+        pemToArrayBuffer(serviceAccount.privateKey),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
+      const assertion = `${signingInput}.${base64UrlEncode(signature)}`;
+
+      const body = new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      });
+
+      const response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to obtain Google access token: HTTP ${response.status}`);
+      }
+
+      const json = await response.json() as { access_token: string; expires_in: number };
+      const tokenCache: AccessTokenCache = {
+        accessToken: json.access_token,
+        expiresAt: Date.now() + json.expires_in * 1000,
+        projectId: serviceAccount.projectId,
+        clientEmail: serviceAccount.clientEmail,
+      };
+      accessTokenCacheByScope.set(scope, tokenCache);
+      return tokenCache;
+    } finally {
+      inflightTokenPromiseByScope.delete(scope);
+    }
+  })();
+
+  inflightTokenPromiseByScope.set(scope, tokenPromise);
+  return tokenPromise;
 }
 
 export async function getScopedAccessToken(scope: string): Promise<{ accessToken: string; projectId: string }> {
@@ -1504,9 +1519,9 @@ export async function getOrCreateUserReferralCode(userId: string, userName?: str
     ? userName.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5)
     : '';
   const randomSuffix = crypto.randomUUID().replace(/[^A-Z0-9]/gi, '').slice(0, 4).toUpperCase();
-  const code = cleanName
+  const code = (cleanName
     ? `REMINDLY-${cleanName}${randomSuffix}`
-    : `REMINDLY-${userId.slice(0, 4).toUpperCase()}${randomSuffix}`;
+    : `REMINDLY-${userId.slice(0, 4).toUpperCase()}${randomSuffix}`).toUpperCase();
 
   const docData: ReferralDoc = {
     userId,
@@ -1548,7 +1563,11 @@ export async function claimReferral(userId: string, referralCode: string): Promi
     throw new Error('referralCode is required.');
   }
 
-  const referral = await getReferralByCode(cleanCode);
+  const [referral, existingTracking] = await Promise.all([
+    getReferralByCode(cleanCode),
+    getUserReferralTracking(userId),
+  ]);
+
   if (!referral) {
     throw new Error('Referral code not found.');
   }
@@ -1557,7 +1576,6 @@ export async function claimReferral(userId: string, referralCode: string): Promi
     throw new Error('Users cannot claim their own referral code.');
   }
 
-  const existingTracking = await getUserReferralTracking(userId);
   if (existingTracking && existingTracking.referredBy) {
     if (existingTracking.referredBy.toUpperCase() === cleanCode) {
       // Idempotent retry on first launch: already claimed with this referral code

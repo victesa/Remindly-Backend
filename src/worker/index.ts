@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { extractWithGemini } from '../server/geminiExtractor.js';
 import { extractUrls, fetchUrlContent, hasSufficientTextDetail } from '../server/urlFetcher.js';
 import { getRuntimeConfig, setRuntimeConfig, type RuntimeConfig } from '../runtimeConfig.js';
-import { ExtractedReminderData, ExtractionResponse, QuotaInfo, StoredReminderItem, SubscriptionEntitlement, UserTier } from '../types.js';
+import { AuthUser, ExtractedReminderData, ExtractionResponse, QuotaInfo, StoredReminderItem, SubscriptionEntitlement, UserTier } from '../types.js';
 import {
   IDEMPOTENCY_CACHE_COLLECTION,
   PAYLOAD_DEDUPE_COLLECTION,
@@ -728,24 +728,37 @@ const endpointHandler = {
         }
       }
 
-      let user;
-      let currentEntitlement: SubscriptionEntitlement | null = null;
+      let user: AuthUser;
       try {
         user = await verifyFirebaseIdToken(request.headers.get('authorization'));
       } catch (error) {
         return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Authentication failed.' }, { status: 401 });
       }
 
-      try {
-        currentEntitlement = await getUserEntitlement(user.uid);
-        user = { ...user, tier: isEntitlementActive(currentEntitlement) ? 'premium' : 'free' as UserTier };
-      } catch {
-        return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
-      }
+      let currentEntitlement: SubscriptionEntitlement | null = null;
+      let entitlementResolved = false;
+
+      const resolveEntitlement = async (): Promise<SubscriptionEntitlement | null> => {
+        if (!entitlementResolved) {
+          try {
+            currentEntitlement = await getUserEntitlement(user.uid);
+            user = { ...user, tier: isEntitlementActive(currentEntitlement) ? 'premium' : 'free' as UserTier };
+            entitlementResolved = true;
+          } catch {
+            throw new Error('Authentication service unavailable.');
+          }
+        }
+        return currentEntitlement;
+      };
 
       const auth = { bearerProvided: true };
 
       if ((pathname === '/v1/me' || pathname === '/v1/user/profile') && request.method === 'GET') {
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
+        }
         const quota = await getQuotaInfo(user.uid, user.tier, currentEntitlement);
         return jsonResponse({
           success: true,
@@ -823,8 +836,10 @@ const endpointHandler = {
 
       if (pathname === '/v1/referral/status' && request.method === 'GET') {
         try {
-          const tracking = await getUserReferralTracking(user.uid);
-          const myCode = await getReferralByUserId(user.uid);
+          const [tracking, myCode] = await Promise.all([
+            getUserReferralTracking(user.uid),
+            getReferralByUserId(user.uid),
+          ]);
           return jsonResponse({
             success: true,
             referral: tracking ? {
@@ -936,6 +951,11 @@ const endpointHandler = {
       }
 
       if (pathname === '/v1/items' && request.method === 'GET') {
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
+        }
         if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Stored captures are available for premium users only.', userId: user.uid, userTier: user.tier }, { status: 403 });
         }
@@ -947,6 +967,11 @@ const endpointHandler = {
       if (pathname === '/v1/items/sync' && request.method === 'GET') {
         if (!auth.bearerProvided) {
           return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
+        }
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
         }
         if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Stored captures are available for premium users only.', userId: user.uid, userTier: user.tier }, { status: 403 });
@@ -972,6 +997,11 @@ const endpointHandler = {
         if (!auth.bearerProvided) {
           return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
         }
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
+        }
         if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Premium access required for item updates.', userId: user.uid, userTier: user.tier }, { status: 403 });
         }
@@ -989,6 +1019,11 @@ const endpointHandler = {
       if (itemMatch && request.method === 'DELETE') {
         if (!auth.bearerProvided) {
           return jsonResponse({ success: false, error: 'Authorization: Bearer <token> is required.' }, { status: 401 });
+        }
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
         }
         if (user.tier !== 'premium') {
           return jsonResponse({ success: false, error: 'Premium access required for item deletion.', userId: user.uid, userTier: user.tier }, { status: 403 });
@@ -1018,6 +1053,11 @@ const endpointHandler = {
       }
 
       if (pathname === '/v1/extract-data' && request.method === 'POST') {
+        try {
+          await resolveEntitlement();
+        } catch {
+          return jsonResponse({ success: false, error: 'Authentication service unavailable.' }, { status: 503 });
+        }
         const parsed = await parseExtractionRequest(request, user.tier);
         const precheck = precheckText(parsed.text, user.tier);
         if (!precheck.allowed) {
